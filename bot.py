@@ -2,10 +2,12 @@ import os
 import json
 import math
 import random
-import sqlite3
 import calendar
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
+
+import psycopg
+from psycopg.rows import dict_row
 
 from telegram import (
     Update,
@@ -29,29 +31,27 @@ from telegram.ext import (
 
 TOKEN = os.getenv("TOKEN")
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 ADMIN_IDS = [5702824058]
 
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID"))
 KITCHEN_CHANNEL_ID = int(os.getenv("KITCHEN_CHANNEL_ID"))
 DELIVERY_CHANNEL_ID = int(os.getenv("DELIVERY_CHANNEL_ID"))
 
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@farrukh01uz")
-CARD_NUMBER = os.getenv("CARD_NUMBER", "9860060138529692")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+CARD_NUMBER = os.getenv("CARD_NUMBER")
 
-RESTAURANT_LAT = float(os.getenv("RESTAURANT_LAT", "41.5550893"))
-RESTAURANT_LON = float(os.getenv("RESTAURANT_LON", "60.6290251"))
+RESTAURANT_LAT = float(os.getenv("RESTAURANT_LAT"))
+RESTAURANT_LON = float(os.getenv("RESTAURANT_LON"))
 
-TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tashkent"))
-
-DB_NAME = "food_bot.db"
+TIMEZONE = ZoneInfo("Asia/Tashkent")
 
 
 # ================= DATABASE =================
 
 def db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_db():
@@ -60,7 +60,7 @@ def init_db():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
+        user_id BIGINT PRIMARY KEY,
         name TEXT,
         phone TEXT
     )
@@ -68,7 +68,7 @@ def init_db():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS foods (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT,
         price INTEGER,
         available INTEGER DEFAULT 1,
@@ -78,8 +78,8 @@ def init_db():
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
         user_name TEXT,
         phone TEXT,
         items TEXT,
@@ -93,12 +93,12 @@ def init_db():
         lat REAL,
         lon REAL,
         created_at TEXT,
-        courier_id INTEGER,
+        courier_id BIGINT,
         courier_name TEXT,
         courier_username TEXT,
         rating INTEGER,
         rating_comment TEXT,
-        admin_msg_id INTEGER
+        admin_msg_id BIGINT
     )
     """)
 
@@ -110,23 +110,10 @@ def init_db():
     )
     """)
 
-    cur.execute("SELECT COUNT(*) AS c FROM settings")
-    if cur.fetchone()["c"] == 0:
+    cur.execute("SELECT COUNT(*) FROM settings")
+    if cur.fetchone()["count"] == 0:
         cur.execute(
             "INSERT INTO settings (id, work_start, work_end) VALUES (1, '10:00', '22:00')"
-        )
-
-    cur.execute("SELECT COUNT(*) AS c FROM foods")
-    if cur.fetchone()["c"] == 0:
-        foods = [
-            ("Lavash", 35000, 1, None),
-            ("Burger", 28000, 1, None),
-            ("Pizza", 70000, 1, None),
-            ("Cola", 12000, 1, None),
-        ]
-        cur.executemany(
-            "INSERT INTO foods (name, price, available, photo_id) VALUES (?, ?, ?, ?)",
-            foods,
         )
 
     conn.commit()
@@ -144,7 +131,7 @@ def format_price(price):
 
 
 def calculate_distance_km(lat1, lon1, lat2, lon2):
-    radius = 6371
+    R = 6371
 
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -157,15 +144,15 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
     )
 
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return round(radius * c, 2)
+    return round(R * c, 2)
 
 
-def get_delivery_fee(distance_km):
-    if distance_km <= 3:
+def get_delivery_fee(distance):
+    if distance <= 3:
         return 10000
-    if distance_km <= 6:
+    elif distance <= 6:
         return 15000
-    if distance_km <= 10:
+    elif distance <= 10:
         return 20000
     return 30000
 
@@ -177,48 +164,18 @@ def generate_code():
     while True:
         code = str(random.randint(1000, 9999))
         cur.execute(
-            "SELECT id FROM orders WHERE code=? AND code_active=1",
-            (code,),
+            "SELECT id FROM orders WHERE code=%s AND code_active=1",
+            (code,)
         )
         if not cur.fetchone():
             conn.close()
             return code
 
 
-def get_settings():
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM settings WHERE id=1")
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def work_time_text():
-    row = get_settings()
-    return f"{row['work_start']} – {row['work_end']}"
-
-
-def is_work_time():
-    row = get_settings()
-
-    start_h, start_m = map(int, row["work_start"].split(":"))
-    end_h, end_m = map(int, row["work_end"].split(":"))
-
-    now = datetime.now(TIMEZONE).time()
-    start = time(start_h, start_m)
-    end = time(end_h, end_m)
-
-    if start < end:
-        return start <= now < end
-
-    return now >= start or now < end
-
-
 def get_foods():
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM foods ORDER BY id ASC")
+    cur.execute("SELECT * FROM foods WHERE available=1 ORDER BY id ASC")
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -227,7 +184,7 @@ def get_foods():
 def get_food(food_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM foods WHERE id=?", (food_id,))
+    cur.execute("SELECT * FROM foods WHERE id=%s", (food_id,))
     row = cur.fetchone()
     conn.close()
     return row
@@ -236,7 +193,7 @@ def get_food(food_id):
 def get_order(order_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE id=?", (order_id,))
+    cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
     row = cur.fetchone()
     conn.close()
     return row
@@ -247,10 +204,10 @@ def update_order(order_id, status=None, code_active=None):
     cur = conn.cursor()
 
     if status is not None:
-        cur.execute("UPDATE orders SET status=? WHERE id=?", (status, order_id))
+        cur.execute("UPDATE orders SET status=%s WHERE id=%s", (status, order_id))
 
     if code_active is not None:
-        cur.execute("UPDATE orders SET code_active=? WHERE id=?", (code_active, order_id))
+        cur.execute("UPDATE orders SET code_active=%s WHERE id=%s", (code_active, order_id))
 
     conn.commit()
     conn.close()
@@ -278,19 +235,11 @@ def order_text(order, title):
     for item in items:
         text += f"- {item['name']} x{item['qty']} — {format_price(item['subtotal'])} so‘m\n"
 
-    text += f"\n🍽 Ovqatlar jami: {format_price(order['food_total'])} so‘m"
-    text += f"\n📍 Masofa: {order['distance_km']} km"
-    text += f"\n🚚 Yetkazib berish: {format_price(order['delivery_fee'])} so‘m"
     text += f"\n💰 Jami: {format_price(order['total'])} so‘m"
 
-    if order["rating"]:
-        text += f"\n\n⭐️ Baho: {order['rating']}"
-
-    if order["rating_comment"]:
-        text += f"\n💬 Izoh: {order['rating_comment']}"
-
     return text
-    # ================= USER START / REGISTER =================
+
+# ================= USER START / REGISTER =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -298,7 +247,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
     user = cur.fetchone()
     conn.close()
 
@@ -332,33 +281,40 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     foods = get_foods()
     keyboard = []
 
-    for food in foods:
-        status = "✅" if food["available"] else "❌ Tugagan"
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{food['name']} — {format_price(food['price'])} so‘m {status}",
-                callback_data=f"food:{food['id']}",
-            )
-        ])
+    if not foods:
+        text = "🍽 Hozircha menyuda ovqat yo‘q."
+    else:
+        text = "🍽 Menyu:\n\nKerakli ovqatni tanlang."
 
-    keyboard.append([InlineKeyboardButton("🛒 Savatcha", callback_data="cart")])
+        for food in foods:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{food['name']} — {format_price(food['price'])} so‘m",
+                    callback_data=f"food:{food['id']}",
+                )
+            ])
 
-    text = "🍽 Menyu:\n\nKerakli ovqatni tanlang."
+        keyboard.append([InlineKeyboardButton("🛒 Savatcha", callback_data="cart")])
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
         )
     else:
         await update.message.reply_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
         )
 
 
 async def show_food_quantity(query, context, food_id):
     food = get_food(food_id)
+
+    if not food:
+        await query.answer("Bu ovqat topilmadi.", show_alert=True)
+        return
+
     qty = context.user_data["cart"].get(str(food_id), 0)
 
     keyboard = [
@@ -449,7 +405,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO foods (name, price, available, photo_id) VALUES (?, ?, 1, ?)",
+        "INSERT INTO foods (name, price, available, photo_id) VALUES (%s, %s, 1, %s)",
         (name, price, photo_id),
     )
     conn.commit()
@@ -477,7 +433,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT OR REPLACE INTO users (user_id, name, phone) VALUES (?, ?, ?)",
+            """
+            INSERT INTO users (user_id, name, phone)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone
+            """,
             (user_id, text, phone),
         )
         conn.commit()
@@ -495,7 +456,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = db()
         cur = conn.cursor()
-        cur.execute("UPDATE orders SET user_name=? WHERE id=?", (text, order_id))
+        cur.execute("UPDATE orders SET user_name=%s WHERE id=%s", (text, order_id))
         conn.commit()
         conn.close()
 
@@ -509,7 +470,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conn = db()
         cur = conn.cursor()
-        cur.execute("UPDATE orders SET phone=? WHERE id=?", (text, order_id))
+        cur.execute("UPDATE orders SET phone=%s WHERE id=%s", (text, order_id))
         conn.commit()
         conn.close()
 
@@ -524,7 +485,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = db()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE orders SET rating_comment=? WHERE id=?",
+            "UPDATE orders SET rating_comment=%s WHERE id=%s",
             (text, order_id),
         )
         conn.commit()
@@ -597,7 +558,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn = db()
             cur = conn.cursor()
             cur.execute(
-                "UPDATE settings SET work_start=?, work_end=? WHERE id=1",
+                "UPDATE settings SET work_start=%s, work_end=%s WHERE id=1",
                 (start_time_text, end_time_text),
             )
             conn.commit()
@@ -613,6 +574,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("Menyu uchun /start bosing.")
+
 # ================= LOCATION / REVIEW =================
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -632,7 +594,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
     user = cur.fetchone()
 
     items = []
@@ -665,10 +627,11 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = food_total + delivery_fee
 
     cur.execute("""
-    INSERT INTO orders 
-    (user_id, user_name, phone, items, food_total, delivery_fee, distance_km, total,
-     code, code_active, status, lat, lon, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
+        INSERT INTO orders 
+        (user_id, user_name, phone, items, food_total, delivery_fee, distance_km, total,
+         code, code_active, status, lat, lon, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, 0, %s, %s, %s, %s)
+        RETURNING id
     """, (
         user_id,
         user["name"],
@@ -684,7 +647,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now_iso(),
     ))
 
-    order_id = cur.lastrowid
+    order_id = cur.fetchone()["id"]
     conn.commit()
     conn.close()
 
@@ -912,7 +875,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO foods (name, price, available, photo_id) VALUES (?, ?, 1, NULL)",
+            "INSERT INTO foods (name, price, available, photo_id) VALUES (%s, %s, 1, NULL)",
             (name, price),
         )
         conn.commit()
@@ -956,7 +919,7 @@ async def confirm_order(query, context, order_id):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE orders SET status=?, code=?, code_active=1 WHERE id=?",
+        "UPDATE orders SET status=%s, code=%s, code_active=1 WHERE id=%s",
         ("payment_waiting", code, order_id),
     )
     conn.commit()
@@ -1095,7 +1058,7 @@ async def send_to_admin(context, order_id):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE orders SET admin_msg_id=? WHERE id=?",
+        "UPDATE orders SET admin_msg_id=%s WHERE id=%s",
         (msg.message_id, order_id),
     )
     conn.commit()
@@ -1205,8 +1168,8 @@ async def delivery_start(query, context, order_id):
     cur = conn.cursor()
     cur.execute("""
         UPDATE orders
-        SET status=?, courier_id=?, courier_name=?, courier_username=?
-        WHERE id=?
+        SET status=%s, courier_id=%s, courier_name=%s, courier_username=%s
+        WHERE id=%s
     """, ("on_the_way", courier_id, courier_name, courier_username, order_id))
     conn.commit()
     conn.close()
@@ -1293,7 +1256,7 @@ async def save_rating(query, context, order_id, rating):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE orders SET rating=? WHERE id=?",
+        "UPDATE orders SET rating=%s WHERE id=%s",
         (rating, order_id),
     )
     conn.commit()
@@ -1322,14 +1285,17 @@ async def skip_comment(query, context, order_id):
             await context.bot.edit_message_text(
                 chat_id=ADMIN_CHANNEL_ID,
                 message_id=order["admin_msg_id"],
-                text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi\n💬 Izoh: qoldirilmadi"),
+                text=order_text(
+                    order,
+                    "✅ Buyurtma yetkazildi\n\nKod yopildi\n💬 Izoh: qoldirilmadi"
+                ),
             )
         except Exception:
             pass
 
     await query.edit_message_text("🙏 Rahmat! Baho uchun minnatdormiz.")
 
-# ================= ADMIN PANEL =================
+ # ================= ADMIN PANEL =================
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1382,12 +1348,12 @@ async def admin_toggle_food(query, food_id):
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT available FROM foods WHERE id=?", (food_id,))
+    cur.execute("SELECT available FROM foods WHERE id=%s", (food_id,))
     food = cur.fetchone()
 
     if food:
         new_status = 0 if food["available"] else 1
-        cur.execute("UPDATE foods SET available=? WHERE id=?", (new_status, food_id))
+        cur.execute("UPDATE foods SET available=%s WHERE id=%s", (new_status, food_id))
 
     conn.commit()
     conn.close()
@@ -1455,7 +1421,6 @@ def get_period_range(period, offset):
 
     else:
         year = today.year + offset
-
         start = datetime(year, 1, 1, 0, 0, 0, tzinfo=TIMEZONE)
         end = datetime(year, 12, 31, 23, 59, 59, tzinfo=TIMEZONE)
         title = "📈 Yillik statistika"
@@ -1473,7 +1438,7 @@ async def show_stats(query, period, offset):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM orders WHERE created_at BETWEEN ? AND ?",
+        "SELECT * FROM orders WHERE created_at BETWEEN %s AND %s",
         (start.isoformat(), end.isoformat()),
     )
     rows = cur.fetchall()
@@ -1554,6 +1519,12 @@ Davr: {start.date()} – {end.date()}
 # ================= RUN BOT =================
 
 def main():
+    if not TOKEN:
+        raise ValueError("TOKEN Railway Variables ichida yo‘q")
+
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL Railway Variables ichida yo‘q")
+
     init_db()
 
     app = Application.builder().token(TOKEN).build()
