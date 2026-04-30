@@ -67,7 +67,7 @@ def init_db():
         items TEXT,
         total INTEGER,
         code TEXT,
-        code_active INTEGER DEFAULT 1,
+        code_active INTEGER DEFAULT 0,
         status TEXT,
         lat REAL,
         lon REAL,
@@ -79,7 +79,8 @@ def init_db():
         "courier_id INTEGER",
         "courier_name TEXT",
         "courier_username TEXT",
-        "rating INTEGER"
+        "rating INTEGER",
+        "admin_msg_id INTEGER"
     ]:
         try:
             cur.execute(f"ALTER TABLE orders ADD COLUMN {column}")
@@ -167,6 +168,12 @@ def order_text(order, title):
     if order["code"]:
         text += f"🔢 Kod: {order['code']}\n"
 
+    if order["courier_name"]:
+        courier = order["courier_name"]
+        if order["courier_username"]:
+            courier += f" (@{order['courier_username']})"
+        text += f"🚚 Kuryer: {courier}\n"
+
     text += "\n🍔 Buyurtmalar:\n"
 
     for item in items:
@@ -214,6 +221,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
     step = context.user_data.get("step")
+
+    if text == "🍽 Yana buyurtma berish":
+        context.user_data["cart"] = {}
+        await show_menu(update, context)
+        return
 
     if step == "waiting_name":
         phone = context.user_data.get("phone")
@@ -537,10 +549,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await confirm_order(query, context, int(data.split(":")[1]))
 
     elif data.startswith("paid_by_user:"):
-        order_id = int(data.split(":")[1])
-        await query.edit_message_text(
-            f"✅ To‘lov qildim deb belgilandi.\n\nBuyurtma #{order_id} bo‘yicha admin to‘lovni tekshiradi."
-        )
+        await paid_by_user(query, context, int(data.split(":")[1]))
 
     elif data.startswith("edit_menu:"):
         order_id = int(data.split(":")[1])
@@ -602,19 +611,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delivery_done(query, context, int(data.split(":")[1]))
 
     elif data.startswith("rate:"):
-        _, order_id, rating = data.split(":")
-        order_id = int(order_id)
-        rating = int(rating)
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("UPDATE orders SET rating=? WHERE id=?", (rating, order_id))
-        conn.commit()
-        conn.close()
-
-        await query.edit_message_text(
-            f"Rahmat! Buyurtma #{order_id} uchun {rating} ⭐️ baho berdingiz."
-        )
+        await save_rating(query, int(data.split(":")[1]), int(data.split(":")[2]))
 
     elif data == "admin_menu":
         await show_admin_menu(query)
@@ -673,6 +670,38 @@ Pul o‘tkazayotganda izoh qismiga shu kodni yozing:
     await send_to_admin(context, order_id)
 
 
+async def paid_by_user(query, context, order_id):
+    order = get_order(order_id)
+
+    await query.answer("✅ Admin tekshiradi.", show_alert=True)
+
+    await query.edit_message_text(
+        order_text(
+            order,
+            "✅ To‘lov qildim deb belgilandi\n\nAdmin to‘lovni tekshiradi"
+        )
+    )
+
+    if order["admin_msg_id"]:
+        keyboard = [
+            [InlineKeyboardButton("✅ To‘lov tasdiqlandi", callback_data=f"admin_paid:{order_id}")],
+            [InlineKeyboardButton("❌ To‘lov tasdiqlanmadi", callback_data=f"admin_not_paid:{order_id}")]
+        ]
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_CHANNEL_ID,
+                message_id=order["admin_msg_id"],
+                text=order_text(
+                    order,
+                    "🆕 Yangi buyurtma\n\nHolat: ⏳ To‘lov kutilmoqda\n\n💳 Mijoz: To‘lov qildim deb belgiladi"
+                ),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception:
+            pass
+
+
 async def edit_order(query, context, order_id, update):
     order = get_order(order_id)
 
@@ -720,10 +749,15 @@ async def confirm_cancel(query, context, order_id):
 
     await query.edit_message_text("❌ Buyurtmangiz bekor qilindi.")
 
-    await context.bot.send_message(
-        chat_id=ADMIN_CHANNEL_ID,
-        text=f"❌ Buyurtma #{order_id} mijoz tomonidan bekor qilindi."
-    )
+    if order["admin_msg_id"]:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_CHANNEL_ID,
+                message_id=order["admin_msg_id"],
+                text=order_text(order, "❌ Buyurtma mijoz tomonidan bekor qilindi")
+            )
+        except Exception:
+            pass
 
 
 async def send_to_admin(context, order_id):
@@ -734,11 +768,17 @@ async def send_to_admin(context, order_id):
         [InlineKeyboardButton("❌ To‘lov tasdiqlanmadi", callback_data=f"admin_not_paid:{order_id}")]
     ]
 
-    await context.bot.send_message(
+    msg = await context.bot.send_message(
         chat_id=ADMIN_CHANNEL_ID,
         text=order_text(order, "🆕 Yangi buyurtma\n\nHolat: ⏳ To‘lov kutilmoqda"),
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE orders SET admin_msg_id=? WHERE id=?", (msg.message_id, order_id))
+    conn.commit()
+    conn.close()
 
 
 async def admin_paid(query, context, order_id):
@@ -764,6 +804,8 @@ async def admin_paid(query, context, order_id):
         text=order_text(order, "👨‍🍳 Oshpazlar uchun buyurtma\n\nHolat: 🍳 Tayyorlanmoqda"),
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+    order = get_order(order_id)
 
     await query.edit_message_text(order_text(order, "✅ To‘lov tasdiqlandi"))
 
@@ -847,16 +889,14 @@ async def delivery_start(query, context, order_id):
         text="🚚 Buyurtmangiz yo‘lga chiqdi. Kuryer tez orada yetib boradi."
     )
 
-    courier_text = courier_name
-    if courier_username:
-        courier_text += f" (@{courier_username})"
+    order = get_order(order_id)
 
     keyboard = [
         [InlineKeyboardButton("✅ Yetkazildi", callback_data=f"delivery_done:{order_id}")]
     ]
 
     await query.edit_message_text(
-        order_text(order, f"🚚 Buyurtma yo‘lga chiqdi\n\nKuryer: {courier_text}"),
+        order_text(order, "🚚 Buyurtma yo‘lga chiqdi"),
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -873,8 +913,9 @@ async def delivery_done(query, context, order_id):
         return
 
     update_order(order_id, status="completed", code_active=0)
+    order = get_order(order_id)
 
-    keyboard = [
+    rating_keyboard = [
         [
             InlineKeyboardButton("1 ⭐️", callback_data=f"rate:{order_id}:1"),
             InlineKeyboardButton("2 ⭐️", callback_data=f"rate:{order_id}:2"),
@@ -886,13 +927,46 @@ async def delivery_done(query, context, order_id):
         ]
     ]
 
-    await context.bot.send_message(
-        chat_id=order["user_id"],
-        text="✅ Buyurtmangiz yetkazildi.\n\nIltimos, xizmatimizga baho bering:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    reply_keyboard = ReplyKeyboardMarkup(
+        [["🍽 Yana buyurtma berish"]],
+        resize_keyboard=True
     )
 
-    await query.edit_message_text(order_text(order, "✅ Buyurtma yakunlandi\n\nKod yopildi"))
+    await context.bot.send_message(
+        chat_id=order["user_id"],
+        text="✅ Buyurtmangiz yetkazildi.",
+        reply_markup=reply_keyboard
+    )
+
+    await context.bot.send_message(
+        chat_id=order["user_id"],
+        text="Iltimos, xizmatimizga baho bering:",
+        reply_markup=InlineKeyboardMarkup(rating_keyboard)
+    )
+
+    await query.edit_message_text(order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi"))
+
+    if order["admin_msg_id"]:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_CHANNEL_ID,
+                message_id=order["admin_msg_id"],
+                text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi")
+            )
+        except Exception:
+            pass
+
+
+async def save_rating(query, order_id, rating):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE orders SET rating=? WHERE id=?", (rating, order_id))
+    conn.commit()
+    conn.close()
+
+    await query.edit_message_text(
+        f"Rahmat! Buyurtma #{order_id} uchun {rating} ⭐️ baho berdingiz."
+    )
 
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
