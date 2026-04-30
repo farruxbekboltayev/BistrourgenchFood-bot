@@ -1,40 +1,57 @@
 import os
 import json
+import math
 import random
 import sqlite3
-from datetime import datetime
+import calendar
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
 
 from telegram import (
-    Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
-    InlineKeyboardButton, InlineKeyboardMarkup
-)
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    Update,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
 )
 
-TOKEN = os.getenv("TOKEN", "BOT_TOKEN_BU_YERGA")
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
+# ================= CONFIG =================
+
+TOKEN = os.getenv("TOKEN")
 
 ADMIN_IDS = [5702824058]
 
-ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID", "-1003925609420"))
-KITCHEN_CHANNEL_ID = int(os.getenv("KITCHEN_CHANNEL_ID", "-1003992130229"))
-DELIVERY_CHANNEL_ID = int(os.getenv("DELIVERY_CHANNEL_ID", "-1003937711655"))
+ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID"))
+KITCHEN_CHANNEL_ID = int(os.getenv("KITCHEN_CHANNEL_ID"))
+DELIVERY_CHANNEL_ID = int(os.getenv("DELIVERY_CHANNEL_ID"))
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@farrukh01uz")
 CARD_NUMBER = os.getenv("CARD_NUMBER", "9860060138529692")
 
+RESTAURANT_LAT = float(os.getenv("RESTAURANT_LAT", "41.5550893"))
+RESTAURANT_LON = float(os.getenv("RESTAURANT_LON", "60.6290251"))
+
+TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tashkent"))
+
 DB_NAME = "food_bot.db"
 
+
+# ================= DATABASE =================
 
 def db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def format_price(price):
-    return f"{price:,}".replace(",", " ")
 
 
 def init_db():
@@ -54,7 +71,8 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
         price INTEGER,
-        available INTEGER DEFAULT 1
+        available INTEGER DEFAULT 1,
+        photo_id TEXT
     )
     """)
 
@@ -65,43 +83,136 @@ def init_db():
         user_name TEXT,
         phone TEXT,
         items TEXT,
-        total INTEGER,
+        food_total INTEGER DEFAULT 0,
+        delivery_fee INTEGER DEFAULT 0,
+        distance_km REAL DEFAULT 0,
+        total INTEGER DEFAULT 0,
         code TEXT,
         code_active INTEGER DEFAULT 0,
         status TEXT,
         lat REAL,
         lon REAL,
-        created_at TEXT
+        created_at TEXT,
+        courier_id INTEGER,
+        courier_name TEXT,
+        courier_username TEXT,
+        rating INTEGER,
+        rating_comment TEXT,
+        admin_msg_id INTEGER
     )
     """)
 
-    for column in [
-        "courier_id INTEGER",
-        "courier_name TEXT",
-        "courier_username TEXT",
-        "rating INTEGER",
-        "admin_msg_id INTEGER"
-    ]:
-        try:
-            cur.execute(f"ALTER TABLE orders ADD COLUMN {column}")
-        except sqlite3.OperationalError:
-            pass
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS settings (
+        id INTEGER PRIMARY KEY,
+        work_start TEXT,
+        work_end TEXT
+    )
+    """)
+
+    cur.execute("SELECT COUNT(*) AS c FROM settings")
+    if cur.fetchone()["c"] == 0:
+        cur.execute(
+            "INSERT INTO settings (id, work_start, work_end) VALUES (1, '10:00', '22:00')"
+        )
 
     cur.execute("SELECT COUNT(*) AS c FROM foods")
     if cur.fetchone()["c"] == 0:
         foods = [
-            ("Lavash", 35000, 1),
-            ("Burger", 28000, 1),
-            ("Pizza", 70000, 1),
-            ("Cola", 12000, 1),
+            ("Lavash", 35000, 1, None),
+            ("Burger", 28000, 1, None),
+            ("Pizza", 70000, 1, None),
+            ("Cola", 12000, 1, None),
         ]
         cur.executemany(
-            "INSERT INTO foods (name, price, available) VALUES (?, ?, ?)",
-            foods
+            "INSERT INTO foods (name, price, available, photo_id) VALUES (?, ?, ?, ?)",
+            foods,
         )
 
     conn.commit()
     conn.close()
+
+
+# ================= HELPERS =================
+
+def now_iso():
+    return datetime.now(TIMEZONE).isoformat()
+
+
+def format_price(price):
+    return f"{int(price):,}".replace(",", " ")
+
+
+def calculate_distance_km(lat1, lon1, lat2, lon2):
+    radius = 6371
+
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return round(radius * c, 2)
+
+
+def get_delivery_fee(distance_km):
+    if distance_km <= 3:
+        return 10000
+    if distance_km <= 6:
+        return 15000
+    if distance_km <= 10:
+        return 20000
+    return 30000
+
+
+def generate_code():
+    conn = db()
+    cur = conn.cursor()
+
+    while True:
+        code = str(random.randint(1000, 9999))
+        cur.execute(
+            "SELECT id FROM orders WHERE code=? AND code_active=1",
+            (code,),
+        )
+        if not cur.fetchone():
+            conn.close()
+            return code
+
+
+def get_settings():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM settings WHERE id=1")
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def work_time_text():
+    row = get_settings()
+    return f"{row['work_start']} – {row['work_end']}"
+
+
+def is_work_time():
+    row = get_settings()
+
+    start_h, start_m = map(int, row["work_start"].split(":"))
+    end_h, end_m = map(int, row["work_end"].split(":"))
+
+    now = datetime.now(TIMEZONE).time()
+    start = time(start_h, start_m)
+    end = time(end_h, end_m)
+
+    if start < end:
+        return start <= now < end
+
+    return now >= start or now < end
 
 
 def get_foods():
@@ -145,18 +256,6 @@ def update_order(order_id, status=None, code_active=None):
     conn.close()
 
 
-def generate_code():
-    conn = db()
-    cur = conn.cursor()
-
-    while True:
-        code = str(random.randint(1000, 9999))
-        cur.execute("SELECT id FROM orders WHERE code=? AND code_active=1", (code,))
-        if not cur.fetchone():
-            conn.close()
-            return code
-
-
 def order_text(order, title):
     items = json.loads(order["items"])
 
@@ -179,9 +278,19 @@ def order_text(order, title):
     for item in items:
         text += f"- {item['name']} x{item['qty']} — {format_price(item['subtotal'])} so‘m\n"
 
+    text += f"\n🍽 Ovqatlar jami: {format_price(order['food_total'])} so‘m"
+    text += f"\n📍 Masofa: {order['distance_km']} km"
+    text += f"\n🚚 Yetkazib berish: {format_price(order['delivery_fee'])} so‘m"
     text += f"\n💰 Jami: {format_price(order['total'])} so‘m"
-    return text
 
+    if order["rating"]:
+        text += f"\n\n⭐️ Baho: {order['rating']}"
+
+    if order["rating_comment"]:
+        text += f"\n💬 Izoh: {order['rating_comment']}"
+
+    return text
+    # ================= USER START / REGISTER =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -202,7 +311,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Assalomu alaykum! Buyurtma berish uchun telefon raqamingizni yuboring.",
-        reply_markup=keyboard
+        reply_markup=keyboard,
     )
 
 
@@ -213,8 +322,143 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Ismingizni yozing:",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardRemove(),
     )
+
+
+# ================= MENU =================
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    foods = get_foods()
+    keyboard = []
+
+    for food in foods:
+        status = "✅" if food["available"] else "❌ Tugagan"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{food['name']} — {format_price(food['price'])} so‘m {status}",
+                callback_data=f"food:{food['id']}",
+            )
+        ])
+
+    keyboard.append([InlineKeyboardButton("🛒 Savatcha", callback_data="cart")])
+
+    text = "🍽 Menyu:\n\nKerakli ovqatni tanlang."
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def show_food_quantity(query, context, food_id):
+    food = get_food(food_id)
+    qty = context.user_data["cart"].get(str(food_id), 0)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("➖", callback_data=f"minus:{food_id}"),
+            InlineKeyboardButton("➕", callback_data=f"plus:{food_id}"),
+        ],
+        [InlineKeyboardButton("🛒 Savatcha", callback_data="cart")],
+        [InlineKeyboardButton("⬅️ Menyu", callback_data="menu")],
+    ]
+
+    caption = (
+        f"🍔 {food['name']}\n"
+        f"Narxi: {format_price(food['price'])} so‘m\n\n"
+        f"Soni: {qty} ta"
+    )
+
+    if food["photo_id"]:
+        await query.message.reply_photo(
+            photo=food["photo_id"],
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+    else:
+        await query.edit_message_text(
+            caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def show_cart(query, context):
+    cart = context.user_data.get("cart", {})
+
+    if not cart:
+        await query.edit_message_text(
+            "🛒 Savatcha bo‘sh.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Menyu", callback_data="menu")]
+            ]),
+        )
+        return
+
+    text = "🛒 Savatcha:\n\n"
+    total = 0
+
+    for food_id, qty in cart.items():
+        food = get_food(int(food_id))
+        if not food:
+            continue
+
+        subtotal = food["price"] * qty
+        total += subtotal
+        text += f"{food['name']} x{qty} — {format_price(subtotal)} so‘m\n"
+
+    text += f"\n🍽 Ovqatlar jami: {format_price(total)} so‘m"
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Buyurtma berish", callback_data="checkout")],
+        [InlineKeyboardButton("⬅️ Menyu", callback_data="menu")],
+    ]
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+# ================= TEXT / PHOTO HANDLERS =================
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    step = context.user_data.get("step")
+    user_id = update.effective_user.id
+
+    if step != "admin_add_photo":
+        return
+
+    if user_id not in ADMIN_IDS:
+        return
+
+    photo_id = update.message.photo[-1].file_id
+    name = context.user_data["new_food_name"]
+    price = context.user_data["new_food_price"]
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO foods (name, price, available, photo_id) VALUES (?, ?, 1, ?)",
+        (name, price, photo_id),
+    )
+    conn.commit()
+    conn.close()
+
+    context.user_data["step"] = None
+
+    await update.message.reply_text("✅ Ovqat rasm bilan menyuga qo‘shildi.")
+    await admin_panel(update, context)
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,7 +478,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         cur.execute(
             "INSERT OR REPLACE INTO users (user_id, name, phone) VALUES (?, ?, ?)",
-            (user_id, text, phone)
+            (user_id, text, phone),
         )
         conn.commit()
         conn.close()
@@ -274,6 +518,43 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_review_message_from_message(update, order_id)
         return
 
+    if step == "waiting_comment":
+        order_id = context.user_data.get("rating_order_id")
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE orders SET rating_comment=? WHERE id=?",
+            (text, order_id),
+        )
+        conn.commit()
+        conn.close()
+
+        order = get_order(order_id)
+
+        if order["admin_msg_id"]:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=ADMIN_CHANNEL_ID,
+                    message_id=order["admin_msg_id"],
+                    text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi"),
+                )
+            except Exception:
+                pass
+
+        context.user_data["step"] = None
+
+        reply_keyboard = ReplyKeyboardMarkup(
+            [["🍽 Yana buyurtma berish"]],
+            resize_keyboard=True,
+        )
+
+        await update.message.reply_text(
+            "🙏 Rahmat! Izohingiz qabul qilindi.",
+            reply_markup=reply_keyboard,
+        )
+        return
+
     if step == "admin_add_name":
         if user_id not in ADMIN_IDS:
             return
@@ -291,99 +572,48 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Narx faqat raqam bo‘lishi kerak.")
             return
 
-        conn = db()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO foods (name, price, available) VALUES (?, ?, 1)",
-            (context.user_data["new_food_name"], int(text))
-        )
-        conn.commit()
-        conn.close()
+        context.user_data["new_food_price"] = int(text)
+        context.user_data["step"] = "admin_add_photo"
 
-        context.user_data["step"] = None
-        await update.message.reply_text("✅ Ovqat menyuga qo‘shildi.")
-        await admin_panel(update, context)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ Rasmsiz qo‘shish", callback_data="admin_skip_photo")]
+        ])
+
+        await update.message.reply_text(
+            "Endi ovqat rasmini yuboring yoki rasmsiz qo‘shing.",
+            reply_markup=keyboard,
+        )
+        return
+
+    if step == "admin_work_time":
+        if user_id not in ADMIN_IDS:
+            return
+
+        try:
+            start_time_text, end_time_text = text.replace(" ", "").split("-")
+            datetime.strptime(start_time_text, "%H:%M")
+            datetime.strptime(end_time_text, "%H:%M")
+
+            conn = db()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE settings SET work_start=?, work_end=? WHERE id=1",
+                (start_time_text, end_time_text),
+            )
+            conn.commit()
+            conn.close()
+
+            context.user_data["step"] = None
+            await update.message.reply_text(
+                f"✅ Ish vaqti yangilandi: {start_time_text} – {end_time_text}"
+            )
+            await admin_panel(update, context)
+        except Exception:
+            await update.message.reply_text("Noto‘g‘ri format. Masalan: 09:00-23:00")
         return
 
     await update.message.reply_text("Menyu uchun /start bosing.")
-
-
-async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    foods = get_foods()
-    keyboard = []
-
-    for food in foods:
-        status = "✅" if food["available"] else "❌ Tugagan"
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{food['name']} — {format_price(food['price'])} so‘m {status}",
-                callback_data=f"food:{food['id']}"
-            )
-        ])
-
-    keyboard.append([InlineKeyboardButton("🛒 Savatcha", callback_data="cart")])
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            "🍽 Menyu:\n\nKerakli ovqatni tanlang.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await update.message.reply_text(
-            "🍽 Menyu:\n\nKerakli ovqatni tanlang.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-async def show_food_quantity(query, context, food_id):
-    food = get_food(food_id)
-    qty = context.user_data["cart"].get(str(food_id), 0)
-
-    keyboard = [
-        [
-            InlineKeyboardButton("➖", callback_data=f"minus:{food_id}"),
-            InlineKeyboardButton("➕", callback_data=f"plus:{food_id}")
-        ],
-        [InlineKeyboardButton("🛒 Savatcha", callback_data="cart")],
-        [InlineKeyboardButton("⬅️ Menyu", callback_data="menu")]
-    ]
-
-    await query.edit_message_text(
-        f"🍔 {food['name']}\nNarxi: {format_price(food['price'])} so‘m\n\nSoni: {qty} ta",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def show_cart(query, context):
-    cart = context.user_data.get("cart", {})
-
-    if not cart:
-        await query.edit_message_text(
-            "🛒 Savatcha bo‘sh.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menyu", callback_data="menu")]])
-        )
-        return
-
-    text = "🛒 Savatcha:\n\n"
-    total = 0
-
-    for food_id, qty in cart.items():
-        food = get_food(int(food_id))
-        if not food:
-            continue
-        subtotal = food["price"] * qty
-        total += subtotal
-        text += f"{food['name']} x{qty} — {format_price(subtotal)} so‘m\n"
-
-    text += f"\n💰 Jami: {format_price(total)} so‘m"
-
-    keyboard = [
-        [InlineKeyboardButton("✅ Buyurtma berish", callback_data="checkout")],
-        [InlineKeyboardButton("⬅️ Menyu", callback_data="menu")]
-    ]
-
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
+# ================= LOCATION / REVIEW =================
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step") != "waiting_location":
@@ -394,7 +624,10 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
 
     if not cart:
-        await update.message.reply_text("Savatchangiz bo‘sh.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(
+            "Savatchangiz bo‘sh.",
+            reply_markup=ReplyKeyboardRemove()
+        )
         return
 
     conn = db()
@@ -403,7 +636,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = cur.fetchone()
 
     items = []
-    total = 0
+    food_total = 0
 
     for food_id, qty in cart.items():
         food = get_food(int(food_id))
@@ -411,29 +644,44 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         subtotal = food["price"] * qty
-        total += subtotal
+        food_total += subtotal
+
         items.append({
             "id": food["id"],
             "name": food["name"],
             "qty": qty,
             "price": food["price"],
-            "subtotal": subtotal
+            "subtotal": subtotal,
         })
+
+    distance_km = calculate_distance_km(
+        RESTAURANT_LAT,
+        RESTAURANT_LON,
+        loc.latitude,
+        loc.longitude,
+    )
+
+    delivery_fee = get_delivery_fee(distance_km)
+    total = food_total + delivery_fee
 
     cur.execute("""
     INSERT INTO orders 
-    (user_id, user_name, phone, items, total, code, code_active, status, lat, lon, created_at)
-    VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
+    (user_id, user_name, phone, items, food_total, delivery_fee, distance_km, total,
+     code, code_active, status, lat, lon, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
     """, (
         user_id,
         user["name"],
         user["phone"],
         json.dumps(items, ensure_ascii=False),
+        food_total,
+        delivery_fee,
+        distance_km,
         total,
         "pending_review",
         loc.latitude,
         loc.longitude,
-        datetime.now().isoformat()
+        now_iso(),
     ))
 
     order_id = cur.lastrowid
@@ -442,7 +690,11 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["step"] = None
 
-    await update.message.reply_text("📍 Lokatsiya qabul qilindi.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(
+        "📍 Lokatsiya qabul qilindi.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
     await send_review_message_from_message(update, order_id)
 
 
@@ -451,17 +703,21 @@ async def send_review_message_from_message(update, order_id):
 
     text = order_text(
         order,
-        "📋 Buyurtmani tekshiring\n\n📍 Manzil: Siz yuborgan lokatsiya qabul qilindi"
+        "📋 Buyurtmani tekshiring\n\n📍 Manzil: Siz yuborgan lokatsiya qabul qilindi",
     )
+
     text += "\n\nAgar hammasi to‘g‘ri bo‘lsa, tasdiqlang."
 
     keyboard = [
         [InlineKeyboardButton("✅ Tasdiqlash va to‘lovga o‘tish", callback_data=f"confirm_order:{order_id}")],
         [InlineKeyboardButton("✏️ Tahrirlash", callback_data=f"edit_menu:{order_id}")],
-        [InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel:{order_id}")]
+        [InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel:{order_id}")],
     ]
 
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 async def send_review_message(query, order_id):
@@ -469,18 +725,24 @@ async def send_review_message(query, order_id):
 
     text = order_text(
         order,
-        "📋 Buyurtmani tekshiring\n\n📍 Manzil: Siz yuborgan lokatsiya qabul qilindi"
+        "📋 Buyurtmani tekshiring\n\n📍 Manzil: Siz yuborgan lokatsiya qabul qilindi",
     )
+
     text += "\n\nAgar hammasi to‘g‘ri bo‘lsa, tasdiqlang."
 
     keyboard = [
         [InlineKeyboardButton("✅ Tasdiqlash va to‘lovga o‘tish", callback_data=f"confirm_order:{order_id}")],
         [InlineKeyboardButton("✏️ Tahrirlash", callback_data=f"edit_menu:{order_id}")],
-        [InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel:{order_id}")]
+        [InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel:{order_id}")],
     ]
 
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
+
+# ================= CALLBACK HANDLER =================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -531,6 +793,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_cart(query, context)
 
     elif data == "checkout":
+        if not is_work_time():
+            await query.answer(
+                f"⏰ Hozir yopiqmiz. Ish vaqti: {work_time_text()}",
+                show_alert=True
+            )
+            return
+
         if not cart:
             await query.edit_message_text("Savatcha bo‘sh.")
             return
@@ -542,7 +811,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(
             "Buyurtmani yakunlash uchun lokatsiyangizni yuboring.",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
 
     elif data.startswith("confirm_order:"):
@@ -558,17 +827,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("👤 Ismni tahrirlash", callback_data=f"edit_name:{order_id}")],
             [InlineKeyboardButton("📞 Telefonni tahrirlash", callback_data=f"edit_phone:{order_id}")],
             [InlineKeyboardButton("🍔 Buyurtmalarni tahrirlash", callback_data=f"edit_order:{order_id}")],
-            [InlineKeyboardButton("⬅️ Orqaga", callback_data=f"back_review:{order_id}")]
+            [InlineKeyboardButton("⬅️ Orqaga", callback_data=f"back_review:{order_id}")],
         ]
 
-        await query.edit_message_text("✏️ Nimani tahrirlaysiz?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "✏️ Nimani tahrirlaysiz?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     elif data.startswith("edit_name:"):
         order_id = int(data.split(":")[1])
         order = get_order(order_id)
+
         if order["status"] not in ["pending_review", "payment_waiting"]:
             await query.answer("Bu buyurtmani endi tahrirlab bo‘lmaydi.", show_alert=True)
             return
+
         context.user_data["step"] = "edit_name"
         context.user_data["edit_order_id"] = order_id
         await query.message.reply_text("Yangi ismni yozing:")
@@ -576,9 +850,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("edit_phone:"):
         order_id = int(data.split(":")[1])
         order = get_order(order_id)
+
         if order["status"] not in ["pending_review", "payment_waiting"]:
             await query.answer("Bu buyurtmani endi tahrirlab bo‘lmaydi.", show_alert=True)
             return
+
         context.user_data["step"] = "edit_phone"
         context.user_data["edit_order_id"] = order_id
         await query.message.reply_text("Yangi telefon raqamni yozing:")
@@ -611,7 +887,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delivery_done(query, context, int(data.split(":")[1]))
 
     elif data.startswith("rate:"):
-        await save_rating(query, int(data.split(":")[1]), int(data.split(":")[2]))
+        await save_rating(query, context, int(data.split(":")[1]), int(data.split(":")[2]))
+
+    elif data.startswith("skip_comment:"):
+        await skip_comment(query, context, int(data.split(":")[1]))
 
     elif data == "admin_menu":
         await show_admin_menu(query)
@@ -619,15 +898,51 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_add_food":
         if query.from_user.id not in ADMIN_IDS:
             return
+
         context.user_data["step"] = "admin_add_name"
         await query.message.reply_text("Yangi ovqat nomini yozing:")
+
+    elif data == "admin_skip_photo":
+        if query.from_user.id not in ADMIN_IDS:
+            return
+
+        name = context.user_data["new_food_name"]
+        price = context.user_data["new_food_price"]
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO foods (name, price, available, photo_id) VALUES (?, ?, 1, NULL)",
+            (name, price),
+        )
+        conn.commit()
+        conn.close()
+
+        context.user_data["step"] = None
+        await query.edit_message_text("✅ Ovqat rasmsiz menyuga qo‘shildi.")
 
     elif data.startswith("admin_toggle:"):
         await admin_toggle_food(query, int(data.split(":")[1]))
 
-    elif data == "admin_stats":
-        await admin_stats(query)
+    elif data == "admin_work_time":
+        if query.from_user.id not in ADMIN_IDS:
+            return
 
+        context.user_data["step"] = "admin_work_time"
+
+        await query.message.reply_text(
+            f"Hozirgi ish vaqti: {work_time_text()}\n\n"
+            "Yangi vaqtni yozing. Masalan: 09:00-23:00"
+        )
+
+    elif data == "admin_stats":
+        await show_stats_menu(query)
+
+    elif data.startswith("stats:"):
+        _, period, offset = data.split(":")
+        await show_stats(query, period, int(offset))
+
+# ================= ORDER FLOW =================
 
 async def confirm_order(query, context, order_id):
     order = get_order(order_id)
@@ -642,7 +957,7 @@ async def confirm_order(query, context, order_id):
     cur = conn.cursor()
     cur.execute(
         "UPDATE orders SET status=?, code=?, code_active=1 WHERE id=?",
-        ("payment_waiting", code, order_id)
+        ("payment_waiting", code, order_id),
     )
     conn.commit()
     conn.close()
@@ -655,7 +970,10 @@ async def confirm_order(query, context, order_id):
 📦 Buyurtma: #{order_id}
 🔢 Tasdiqlash kodi: {code}
 
+🍽 Ovqatlar jami: {format_price(order['food_total'])} so‘m
+🚚 Yetkazib berish: {format_price(order['delivery_fee'])} so‘m
 💰 Jami summa: {format_price(order['total'])} so‘m
+
 💳 Karta: {CARD_NUMBER}
 
 Pul o‘tkazayotganda izoh qismiga shu kodni yozing:
@@ -685,7 +1003,7 @@ async def paid_by_user(query, context, order_id):
     if order["admin_msg_id"]:
         keyboard = [
             [InlineKeyboardButton("✅ To‘lov tasdiqlandi", callback_data=f"admin_paid:{order_id}")],
-            [InlineKeyboardButton("❌ To‘lov tasdiqlanmadi", callback_data=f"admin_not_paid:{order_id}")]
+            [InlineKeyboardButton("❌ To‘lov tasdiqlanmadi", callback_data=f"admin_not_paid:{order_id}")],
         ]
 
         try:
@@ -694,9 +1012,9 @@ async def paid_by_user(query, context, order_id):
                 message_id=order["admin_msg_id"],
                 text=order_text(
                     order,
-                    "🆕 Yangi buyurtma\n\nHolat: ⏳ To‘lov kutilmoqda\n\n💳 Mijoz: To‘lov qildim deb belgiladi"
+                    "🆕 Yangi buyurtma\n\nHolat: ⏳ To‘lov kutilmoqda\n\n💳 Mijoz: To‘lov qildim deb belgiladi",
                 ),
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         except Exception:
             pass
@@ -729,12 +1047,12 @@ async def edit_order(query, context, order_id, update):
 async def cancel_question(query, order_id):
     keyboard = [
         [InlineKeyboardButton("✅ Ha, bekor qilaman", callback_data=f"confirm_cancel:{order_id}")],
-        [InlineKeyboardButton("❌ Yo‘q", callback_data=f"back_review:{order_id}")]
+        [InlineKeyboardButton("❌ Yo‘q", callback_data=f"back_review:{order_id}")],
     ]
 
     await query.edit_message_text(
         "❗ Rostdan ham buyurtmani bekor qilmoqchimisiz?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -754,7 +1072,7 @@ async def confirm_cancel(query, context, order_id):
             await context.bot.edit_message_text(
                 chat_id=ADMIN_CHANNEL_ID,
                 message_id=order["admin_msg_id"],
-                text=order_text(order, "❌ Buyurtma mijoz tomonidan bekor qilindi")
+                text=order_text(order, "❌ Buyurtma mijoz tomonidan bekor qilindi"),
             )
         except Exception:
             pass
@@ -765,18 +1083,21 @@ async def send_to_admin(context, order_id):
 
     keyboard = [
         [InlineKeyboardButton("✅ To‘lov tasdiqlandi", callback_data=f"admin_paid:{order_id}")],
-        [InlineKeyboardButton("❌ To‘lov tasdiqlanmadi", callback_data=f"admin_not_paid:{order_id}")]
+        [InlineKeyboardButton("❌ To‘lov tasdiqlanmadi", callback_data=f"admin_not_paid:{order_id}")],
     ]
 
     msg = await context.bot.send_message(
         chat_id=ADMIN_CHANNEL_ID,
         text=order_text(order, "🆕 Yangi buyurtma\n\nHolat: ⏳ To‘lov kutilmoqda"),
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("UPDATE orders SET admin_msg_id=? WHERE id=?", (msg.message_id, order_id))
+    cur.execute(
+        "UPDATE orders SET admin_msg_id=? WHERE id=?",
+        (msg.message_id, order_id),
+    )
     conn.commit()
     conn.close()
 
@@ -789,10 +1110,11 @@ async def admin_paid(query, context, order_id):
         return
 
     update_order(order_id, status="paid")
+    order = get_order(order_id)
 
     await context.bot.send_message(
         chat_id=order["user_id"],
-        text="✅ To‘lovingiz tasdiqlandi. Buyurtmangiz tayyorlanmoqda."
+        text="✅ To‘lovingiz tasdiqlandi. Buyurtmangiz tayyorlanmoqda.",
     )
 
     keyboard = [
@@ -802,17 +1124,17 @@ async def admin_paid(query, context, order_id):
     await context.bot.send_message(
         chat_id=KITCHEN_CHANNEL_ID,
         text=order_text(order, "👨‍🍳 Oshpazlar uchun buyurtma\n\nHolat: 🍳 Tayyorlanmoqda"),
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
-
-    order = get_order(order_id)
 
     await query.edit_message_text(order_text(order, "✅ To‘lov tasdiqlandi"))
 
 
 async def admin_not_paid(query, context, order_id):
     order = get_order(order_id)
+
     update_order(order_id, status="payment_rejected")
+    order = get_order(order_id)
 
     admin_link = f"https://t.me/{ADMIN_USERNAME.replace('@', '')}"
 
@@ -821,11 +1143,12 @@ async def admin_not_paid(query, context, order_id):
         text="❌ To‘lovingiz tasdiqlanmadi.\n\nIltimos, admin bilan bog‘laning.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("👨‍💼 Admin bilan bog‘lanish", url=admin_link)]
-        ])
+        ]),
     )
 
     await query.edit_message_text(order_text(order, "❌ To‘lov tasdiqlanmadi"))
 
+# ================= KITCHEN / DELIVERY / RATING =================
 
 async def kitchen_ready(query, context, order_id):
     order = get_order(order_id)
@@ -835,10 +1158,11 @@ async def kitchen_ready(query, context, order_id):
         return
 
     update_order(order_id, status="ready")
+    order = get_order(order_id)
 
     await context.bot.send_message(
         chat_id=order["user_id"],
-        text="🍔 Buyurtmangiz tayyor bo‘ldi. Tez orada kuryer yo‘lga chiqadi."
+        text="🍔 Buyurtmangiz tayyor bo‘ldi. Tez orada kuryer yo‘lga chiqadi.",
     )
 
     keyboard = [
@@ -849,15 +1173,15 @@ async def kitchen_ready(query, context, order_id):
         chat_id=DELIVERY_CHANNEL_ID,
         text=order_text(
             order,
-            "🚚 Kuryerlar uchun buyurtma\n\nHolat: ✅ Tayyor\n📍 Lokatsiya pastda yuborilgan"
+            "🚚 Kuryerlar uchun buyurtma\n\nHolat: ✅ Tayyor\n📍 Lokatsiya pastda yuborilgan",
         ),
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
     await context.bot.send_location(
         chat_id=DELIVERY_CHANNEL_ID,
         latitude=order["lat"],
-        longitude=order["lon"]
+        longitude=order["lon"],
     )
 
     await query.edit_message_text(order_text(order, "✅ Buyurtma tayyorlandi"))
@@ -867,7 +1191,10 @@ async def delivery_start(query, context, order_id):
     order = get_order(order_id)
 
     if order["status"] != "ready":
-        await query.answer("Bu buyurtmani boshqa kuryer olgan yoki hali tayyor emas.", show_alert=True)
+        await query.answer(
+            "Bu buyurtmani boshqa kuryer olgan yoki hali tayyor emas.",
+            show_alert=True,
+        )
         return
 
     courier_id = query.from_user.id
@@ -877,19 +1204,19 @@ async def delivery_start(query, context, order_id):
     conn = db()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE orders 
+        UPDATE orders
         SET status=?, courier_id=?, courier_name=?, courier_username=?
         WHERE id=?
     """, ("on_the_way", courier_id, courier_name, courier_username, order_id))
     conn.commit()
     conn.close()
 
+    order = get_order(order_id)
+
     await context.bot.send_message(
         chat_id=order["user_id"],
-        text="🚚 Buyurtmangiz yo‘lga chiqdi. Kuryer tez orada yetib boradi."
+        text="🚚 Buyurtmangiz yo‘lga chiqdi. Kuryer tez orada yetib boradi.",
     )
-
-    order = get_order(order_id)
 
     keyboard = [
         [InlineKeyboardButton("✅ Yetkazildi", callback_data=f"delivery_done:{order_id}")]
@@ -897,7 +1224,7 @@ async def delivery_start(query, context, order_id):
 
     await query.edit_message_text(
         order_text(order, "🚚 Buyurtma yo‘lga chiqdi"),
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -905,7 +1232,10 @@ async def delivery_done(query, context, order_id):
     order = get_order(order_id)
 
     if order["courier_id"] and order["courier_id"] != query.from_user.id:
-        await query.answer("Bu buyurtmani faqat olgan kuryer yakunlay oladi.", show_alert=True)
+        await query.answer(
+            "Bu buyurtmani faqat olgan kuryer yakunlay oladi.",
+            show_alert=True,
+        )
         return
 
     if order["status"] != "on_the_way":
@@ -924,50 +1254,82 @@ async def delivery_done(query, context, order_id):
         [
             InlineKeyboardButton("4 ⭐️", callback_data=f"rate:{order_id}:4"),
             InlineKeyboardButton("5 ⭐️", callback_data=f"rate:{order_id}:5"),
-        ]
+        ],
     ]
 
     reply_keyboard = ReplyKeyboardMarkup(
         [["🍽 Yana buyurtma berish"]],
-        resize_keyboard=True
+        resize_keyboard=True,
     )
 
     await context.bot.send_message(
         chat_id=order["user_id"],
         text="✅ Buyurtmangiz yetkazildi.",
-        reply_markup=reply_keyboard
+        reply_markup=reply_keyboard,
     )
 
     await context.bot.send_message(
         chat_id=order["user_id"],
         text="Iltimos, xizmatimizga baho bering:",
-        reply_markup=InlineKeyboardMarkup(rating_keyboard)
+        reply_markup=InlineKeyboardMarkup(rating_keyboard),
     )
 
-    await query.edit_message_text(order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi"))
+    await query.edit_message_text(
+        order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi")
+    )
 
     if order["admin_msg_id"]:
         try:
             await context.bot.edit_message_text(
                 chat_id=ADMIN_CHANNEL_ID,
                 message_id=order["admin_msg_id"],
-                text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi")
+                text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi"),
             )
         except Exception:
             pass
 
 
-async def save_rating(query, order_id, rating):
+async def save_rating(query, context, order_id, rating):
     conn = db()
     cur = conn.cursor()
-    cur.execute("UPDATE orders SET rating=? WHERE id=?", (rating, order_id))
+    cur.execute(
+        "UPDATE orders SET rating=? WHERE id=?",
+        (rating, order_id),
+    )
     conn.commit()
     conn.close()
 
+    context.user_data["step"] = "waiting_comment"
+    context.user_data["rating_order_id"] = order_id
+
+    keyboard = [
+        [InlineKeyboardButton("⏭ O‘tkazib yuborish", callback_data=f"skip_comment:{order_id}")]
+    ]
+
     await query.edit_message_text(
-        f"Rahmat! Buyurtma #{order_id} uchun {rating} ⭐️ baho berdingiz."
+        f"Rahmat! Siz {rating} ⭐️ baho berdingiz.\n\n💬 Izoh yozing yoki o‘tkazib yuboring:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+
+async def skip_comment(query, context, order_id):
+    context.user_data["step"] = None
+
+    order = get_order(order_id)
+
+    if order["admin_msg_id"]:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=ADMIN_CHANNEL_ID,
+                message_id=order["admin_msg_id"],
+                text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi\n💬 Izoh: qoldirilmadi"),
+            )
+        except Exception:
+            pass
+
+    await query.edit_message_text("🙏 Rahmat! Baho uchun minnatdormiz.")
+
+# ================= ADMIN PANEL =================
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -979,12 +1341,13 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🍽 Menyuni boshqarish", callback_data="admin_menu")],
         [InlineKeyboardButton("➕ Ovqat qo‘shish", callback_data="admin_add_food")],
-        [InlineKeyboardButton("📊 Statistika", callback_data="admin_stats")]
+        [InlineKeyboardButton("⏰ Ish vaqtini sozlash", callback_data="admin_work_time")],
+        [InlineKeyboardButton("📊 Statistika", callback_data="admin_stats")],
     ]
 
     await update.message.reply_text(
         "👨‍💼 Admin panel:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -1001,13 +1364,16 @@ async def show_admin_menu(query):
         keyboard.append([
             InlineKeyboardButton(
                 f"{food['name']} holatini o‘zgartirish",
-                callback_data=f"admin_toggle:{food['id']}"
+                callback_data=f"admin_toggle:{food['id']}",
             )
         ])
 
     keyboard.append([InlineKeyboardButton("➕ Ovqat qo‘shish", callback_data="admin_add_food")])
 
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def admin_toggle_food(query, food_id):
@@ -1029,62 +1395,163 @@ async def admin_toggle_food(query, food_id):
     await show_admin_menu(query)
 
 
-async def admin_stats(query):
+# ================= STATISTICS =================
+
+async def show_stats_menu(query):
     if query.from_user.id not in ADMIN_IDS:
         return
 
+    keyboard = [
+        [InlineKeyboardButton("📅 Kunlik", callback_data="stats:day:0")],
+        [InlineKeyboardButton("🗓 Haftalik", callback_data="stats:week:0")],
+        [InlineKeyboardButton("📆 Oylik", callback_data="stats:month:0")],
+        [InlineKeyboardButton("📈 Yillik", callback_data="stats:year:0")],
+    ]
+
+    await query.edit_message_text(
+        "📊 Statistika turini tanlang:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+def get_period_range(period, offset):
+    today = datetime.now(TIMEZONE).date()
+
+    if period == "day":
+        target = today + timedelta(days=offset)
+        start = datetime.combine(target, time.min, tzinfo=TIMEZONE)
+        end = datetime.combine(target, time.max, tzinfo=TIMEZONE)
+        title = "📅 Kunlik statistika"
+        nav = ("⬅️ Oldingi kun", "Keyingi kun ➡️")
+
+    elif period == "week":
+        monday = today - timedelta(days=today.weekday())
+        target_monday = monday + timedelta(weeks=offset)
+        target_sunday = target_monday + timedelta(days=6)
+
+        start = datetime.combine(target_monday, time.min, tzinfo=TIMEZONE)
+        end = datetime.combine(target_sunday, time.max, tzinfo=TIMEZONE)
+        title = "🗓 Haftalik statistika"
+        nav = ("⬅️ Oldingi hafta", "Keyingi hafta ➡️")
+
+    elif period == "month":
+        year = today.year
+        month = today.month + offset
+
+        while month < 1:
+            month += 12
+            year -= 1
+
+        while month > 12:
+            month -= 12
+            year += 1
+
+        last_day = calendar.monthrange(year, month)[1]
+
+        start = datetime(year, month, 1, 0, 0, 0, tzinfo=TIMEZONE)
+        end = datetime(year, month, last_day, 23, 59, 59, tzinfo=TIMEZONE)
+        title = "📆 Oylik statistika"
+        nav = ("⬅️ Oldingi oy", "Keyingi oy ➡️")
+
+    else:
+        year = today.year + offset
+
+        start = datetime(year, 1, 1, 0, 0, 0, tzinfo=TIMEZONE)
+        end = datetime(year, 12, 31, 23, 59, 59, tzinfo=TIMEZONE)
+        title = "📈 Yillik statistika"
+        nav = ("⬅️ Oldingi yil", "Keyingi yil ➡️")
+
+    return start, end, title, nav
+
+
+async def show_stats(query, period, offset):
+    if query.from_user.id not in ADMIN_IDS:
+        return
+
+    start, end, title, nav = get_period_range(period, offset)
+
     conn = db()
     cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) AS c FROM orders")
-    total_orders = cur.fetchone()["c"]
-
-    cur.execute("SELECT COUNT(*) AS c FROM orders WHERE status='completed'")
-    completed_orders = cur.fetchone()["c"]
-
-    cur.execute("SELECT COUNT(*) AS c FROM orders WHERE status='cancelled'")
-    cancelled_orders = cur.fetchone()["c"]
-
-    cur.execute("SELECT COALESCE(SUM(total), 0) AS s FROM orders WHERE status='completed'")
-    revenue = cur.fetchone()["s"]
-
-    cur.execute("SELECT AVG(rating) AS avg_rating FROM orders WHERE rating IS NOT NULL")
-    avg_rating = cur.fetchone()["avg_rating"]
-
-    cur.execute("SELECT items FROM orders WHERE status='completed'")
+    cur.execute(
+        "SELECT * FROM orders WHERE created_at BETWEEN ? AND ?",
+        (start.isoformat(), end.isoformat()),
+    )
     rows = cur.fetchall()
+    conn.close()
+
+    total_orders = len(rows)
+    completed = [r for r in rows if r["status"] == "completed"]
+    cancelled = [r for r in rows if r["status"] == "cancelled"]
+    rejected = [r for r in rows if r["status"] == "payment_rejected"]
+
+    revenue = sum((r["total"] or 0) for r in completed)
+
+    ratings = [r["rating"] for r in completed if r["rating"]]
+    avg_rating = round(sum(ratings) / len(ratings), 1) if ratings else "Hali baho yo‘q"
 
     food_count = {}
+    courier_count = {}
 
-    for row in rows:
-        items = json.loads(row["items"])
+    for row in completed:
+        try:
+            items = json.loads(row["items"])
+        except Exception:
+            items = []
+
         for item in items:
             food_count[item["name"]] = food_count.get(item["name"], 0) + item["qty"]
 
-    conn.close()
+        if row["courier_name"]:
+            courier_count[row["courier_name"]] = courier_count.get(row["courier_name"], 0) + 1
 
-    top_food_text = "Hali yo‘q"
     if food_count:
-        top_food = max(food_count, key=food_count.get)
-        top_food_text = f"{top_food} — {food_count[top_food]} ta"
+        foods_text = "\n".join(
+            [f"- {name}: {qty} ta" for name, qty in sorted(food_count.items())]
+        )
+    else:
+        foods_text = "Hali yo‘q"
 
-    avg_rating_text = round(avg_rating, 1) if avg_rating else "Hali baho yo‘q"
+    if courier_count:
+        courier_text = "\n".join(
+            [f"- {name}: {qty} ta" for name, qty in sorted(courier_count.items())]
+        )
+    else:
+        courier_text = "Hali yo‘q"
 
     text = f"""
-📊 Statistika
+{title}
+Davr: {start.date()} – {end.date()}
 
 📦 Jami buyurtmalar: {total_orders}
-✅ Yakunlangan: {completed_orders}
-❌ Bekor qilingan: {cancelled_orders}
+✅ Yetkazilgan: {len(completed)}
+❌ Bekor qilingan: {len(cancelled)}
+💳 To‘lov tasdiqlanmagan: {len(rejected)}
 
-💰 Umumiy tushum: {format_price(revenue)} so‘m
+💰 Jami tushum: {format_price(revenue)} so‘m
+⭐️ O‘rtacha baho: {avg_rating}
 
-🔥 Eng ko‘p sotilgan: {top_food_text}
-⭐️ O‘rtacha baho: {avg_rating_text}
+🍔 Ovqatlar:
+{foods_text}
+
+🚚 Kuryerlar:
+{courier_text}
 """
 
-    await query.edit_message_text(text)
+    keyboard = [
+        [
+            InlineKeyboardButton(nav[0], callback_data=f"stats:{period}:{offset - 1}"),
+            InlineKeyboardButton(nav[1], callback_data=f"stats:{period}:{offset + 1}"),
+        ],
+        [InlineKeyboardButton("⬅️ Statistika menyusi", callback_data="admin_stats")],
+    ]
 
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+# ================= RUN BOT =================
 
 def main():
     init_db()
@@ -1096,6 +1563,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
