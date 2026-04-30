@@ -27,10 +27,7 @@ from telegram.ext import (
     filters,
 )
 
-# ================= CONFIG =================
-
 TOKEN = os.getenv("TOKEN")
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 ADMIN_IDS = [5702824058]
@@ -39,16 +36,14 @@ ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL_ID"))
 KITCHEN_CHANNEL_ID = int(os.getenv("KITCHEN_CHANNEL_ID"))
 DELIVERY_CHANNEL_ID = int(os.getenv("DELIVERY_CHANNEL_ID"))
 
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
-CARD_NUMBER = os.getenv("CARD_NUMBER")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@farrukh01uz")
+CARD_NUMBER = os.getenv("CARD_NUMBER", "9860060138529692")
 
-RESTAURANT_LAT = float(os.getenv("RESTAURANT_LAT"))
-RESTAURANT_LON = float(os.getenv("RESTAURANT_LON"))
+RESTAURANT_LAT = float(os.getenv("RESTAURANT_LAT", "41.5550893"))
+RESTAURANT_LON = float(os.getenv("RESTAURANT_LON", "60.6290251"))
 
-TIMEZONE = ZoneInfo("Asia/Tashkent")
+TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Asia/Tashkent"))
 
-
-# ================= DATABASE =================
 
 def db():
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
@@ -59,7 +54,7 @@ def init_db():
     cur = conn.cursor()
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS food_users (
         user_id BIGINT PRIMARY KEY,
         name TEXT,
         phone TEXT
@@ -67,7 +62,7 @@ def init_db():
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS foods (
+    CREATE TABLE IF NOT EXISTS food_foods (
         id SERIAL PRIMARY KEY,
         name TEXT,
         price INTEGER,
@@ -77,7 +72,7 @@ def init_db():
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
+    CREATE TABLE IF NOT EXISTS food_orders (
         id SERIAL PRIMARY KEY,
         user_id BIGINT,
         user_name TEXT,
@@ -103,24 +98,35 @@ def init_db():
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
+    CREATE TABLE IF NOT EXISTS food_settings (
         id INTEGER PRIMARY KEY,
         work_start TEXT,
         work_end TEXT
     )
     """)
 
-    cur.execute("SELECT COUNT(*) FROM settings")
+    cur.execute("SELECT COUNT(*) FROM food_settings")
     if cur.fetchone()["count"] == 0:
         cur.execute(
-            "INSERT INTO settings (id, work_start, work_end) VALUES (1, '10:00', '22:00')"
+            "INSERT INTO food_settings (id, work_start, work_end) VALUES (1, '10:00', '22:00')"
+        )
+
+    cur.execute("SELECT COUNT(*) FROM food_foods")
+    if cur.fetchone()["count"] == 0:
+        foods = [
+            ("Lavash", 35000, 1, None),
+            ("Burger", 28000, 1, None),
+            ("Pizza", 70000, 1, None),
+            ("Cola", 12000, 1, None),
+        ]
+        cur.executemany(
+            "INSERT INTO food_foods (name, price, available, photo_id) VALUES (%s, %s, %s, %s)",
+            foods,
         )
 
     conn.commit()
     conn.close()
 
-
-# ================= HELPERS =================
 
 def now_iso():
     return datetime.now(TIMEZONE).isoformat()
@@ -131,7 +137,7 @@ def format_price(price):
 
 
 def calculate_distance_km(lat1, lon1, lat2, lon2):
-    R = 6371
+    radius = 6371
 
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -144,15 +150,15 @@ def calculate_distance_km(lat1, lon1, lat2, lon2):
     )
 
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return round(R * c, 2)
+    return round(radius * c, 2)
 
 
-def get_delivery_fee(distance):
-    if distance <= 3:
+def get_delivery_fee(distance_km):
+    if distance_km <= 3:
         return 10000
-    elif distance <= 6:
+    if distance_km <= 6:
         return 15000
-    elif distance <= 10:
+    if distance_km <= 10:
         return 20000
     return 30000
 
@@ -164,18 +170,53 @@ def generate_code():
     while True:
         code = str(random.randint(1000, 9999))
         cur.execute(
-            "SELECT id FROM orders WHERE code=%s AND code_active=1",
-            (code,)
+            "SELECT id FROM food_orders WHERE code=%s AND code_active=1",
+            (code,),
         )
         if not cur.fetchone():
             conn.close()
             return code
 
 
-def get_foods():
+def get_settings():
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM foods WHERE available=1 ORDER BY id ASC")
+    cur.execute("SELECT * FROM food_settings WHERE id=%s", (1,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def work_time_text():
+    row = get_settings()
+    return f"{row['work_start']} – {row['work_end']}"
+
+
+def is_work_time():
+    row = get_settings()
+
+    start_h, start_m = map(int, row["work_start"].split(":"))
+    end_h, end_m = map(int, row["work_end"].split(":"))
+
+    now = datetime.now(TIMEZONE).time()
+    start = time(start_h, start_m)
+    end = time(end_h, end_m)
+
+    if start < end:
+        return start <= now < end
+
+    return now >= start or now < end
+
+
+def get_foods(include_all=False):
+    conn = db()
+    cur = conn.cursor()
+
+    if include_all:
+        cur.execute("SELECT * FROM food_foods ORDER BY id ASC")
+    else:
+        cur.execute("SELECT * FROM food_foods WHERE available=1 ORDER BY id ASC")
+
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -184,7 +225,7 @@ def get_foods():
 def get_food(food_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM foods WHERE id=%s", (food_id,))
+    cur.execute("SELECT * FROM food_foods WHERE id=%s", (food_id,))
     row = cur.fetchone()
     conn.close()
     return row
@@ -193,7 +234,7 @@ def get_food(food_id):
 def get_order(order_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE id=%s", (order_id,))
+    cur.execute("SELECT * FROM food_orders WHERE id=%s", (order_id,))
     row = cur.fetchone()
     conn.close()
     return row
@@ -204,10 +245,16 @@ def update_order(order_id, status=None, code_active=None):
     cur = conn.cursor()
 
     if status is not None:
-        cur.execute("UPDATE orders SET status=%s WHERE id=%s", (status, order_id))
+        cur.execute(
+            "UPDATE food_orders SET status=%s WHERE id=%s",
+            (status, order_id),
+        )
 
     if code_active is not None:
-        cur.execute("UPDATE orders SET code_active=%s WHERE id=%s", (code_active, order_id))
+        cur.execute(
+            "UPDATE food_orders SET code_active=%s WHERE id=%s",
+            (code_active, order_id),
+        )
 
     conn.commit()
     conn.close()
@@ -235,19 +282,31 @@ def order_text(order, title):
     for item in items:
         text += f"- {item['name']} x{item['qty']} — {format_price(item['subtotal'])} so‘m\n"
 
+    text += f"\n🍽 Ovqatlar jami: {format_price(order['food_total'])} so‘m"
+    text += f"\n📍 Masofa: {order['distance_km']} km"
+    text += f"\n🚚 Yetkazib berish: {format_price(order['delivery_fee'])} so‘m"
     text += f"\n💰 Jami: {format_price(order['total'])} so‘m"
+
+    if order["rating"]:
+        text += f"\n\n⭐️ Baho: {order['rating']}"
+
+    if order["rating_comment"]:
+        text += f"\n💬 Izoh: {order['rating_comment']}"
 
     return text
 
 # ================= USER START / REGISTER =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🔥 har safar /start bosilganda eski step va vaqtinchalik ma’lumotlar tozalanadi
+    context.user_data.clear()
+
     user_id = update.effective_user.id
     context.user_data.setdefault("cart", {})
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
+    cur.execute("SELECT * FROM food_users WHERE user_id=%s", (user_id,))
     user = cur.fetchone()
     conn.close()
 
@@ -312,7 +371,7 @@ async def show_food_quantity(query, context, food_id):
     food = get_food(food_id)
 
     if not food:
-        await query.answer("Bu ovqat topilmadi.", show_alert=True)
+        await query.answer("Ovqat topilmadi.", show_alert=True)
         return
 
     qty = context.user_data["cart"].get(str(food_id), 0)
@@ -371,6 +430,7 @@ async def show_cart(query, context):
 
         subtotal = food["price"] * qty
         total += subtotal
+
         text += f"{food['name']} x{qty} — {format_price(subtotal)} so‘m\n"
 
     text += f"\n🍽 Ovqatlar jami: {format_price(total)} so‘m"
@@ -386,7 +446,72 @@ async def show_cart(query, context):
     )
 
 
-# ================= TEXT / PHOTO HANDLERS =================
+# ================= TEXT HANDLER =================
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
+    step = context.user_data.get("step")
+
+    if text == "🍽 Yana buyurtma berish":
+        context.user_data["cart"] = {}
+        await show_menu(update, context)
+        return
+
+    # 🔹 Ism kiritish
+    if step == "waiting_name":
+        phone = context.user_data.get("phone")
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO food_users (user_id, name, phone)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone
+            """,
+            (user_id, text, phone),
+        )
+        conn.commit()
+        conn.close()
+
+        context.user_data["step"] = None
+        context.user_data["cart"] = {}
+
+        await update.message.reply_text(f"Rahmat, {text}!")
+        await show_menu(update, context)
+        return
+
+    # 🔹 Izoh yozish (ratingdan keyin)
+    if step == "waiting_comment":
+        order_id = context.user_data.get("rating_order_id")
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE food_orders SET rating_comment=%s WHERE id=%s",
+            (text, order_id),
+        )
+        conn.commit()
+        conn.close()
+
+        context.user_data["step"] = None
+
+        reply_keyboard = ReplyKeyboardMarkup(
+            [["🍽 Yana buyurtma berish"]],
+            resize_keyboard=True,
+        )
+
+        await update.message.reply_text(
+            "🙏 Rahmat! Izohingiz qabul qilindi.",
+            reply_markup=reply_keyboard,
+        )
+        return
+
+    await update.message.reply_text("Menyu uchun /start bosing.")
+
+# ================= PHOTO HANDLER FOR ADMIN ADD FOOD =================
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
@@ -405,7 +530,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO foods (name, price, available, photo_id) VALUES (%s, %s, 1, %s)",
+        "INSERT INTO food_foods (name, price, available, photo_id) VALUES (%s, %s, 1, %s)",
         (name, price, photo_id),
     )
     conn.commit()
@@ -416,164 +541,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Ovqat rasm bilan menyuga qo‘shildi.")
     await admin_panel(update, context)
 
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
-    step = context.user_data.get("step")
-
-    if text == "🍽 Yana buyurtma berish":
-        context.user_data["cart"] = {}
-        await show_menu(update, context)
-        return
-
-    if step == "waiting_name":
-        phone = context.user_data.get("phone")
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO users (user_id, name, phone)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id)
-            DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone
-            """,
-            (user_id, text, phone),
-        )
-        conn.commit()
-        conn.close()
-
-        context.user_data["step"] = None
-        context.user_data["cart"] = {}
-
-        await update.message.reply_text(f"Rahmat, {text}!")
-        await show_menu(update, context)
-        return
-
-    if step == "edit_name":
-        order_id = context.user_data["edit_order_id"]
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("UPDATE orders SET user_name=%s WHERE id=%s", (text, order_id))
-        conn.commit()
-        conn.close()
-
-        context.user_data["step"] = None
-        await update.message.reply_text("✅ Ism yangilandi.")
-        await send_review_message_from_message(update, order_id)
-        return
-
-    if step == "edit_phone":
-        order_id = context.user_data["edit_order_id"]
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("UPDATE orders SET phone=%s WHERE id=%s", (text, order_id))
-        conn.commit()
-        conn.close()
-
-        context.user_data["step"] = None
-        await update.message.reply_text("✅ Telefon raqam yangilandi.")
-        await send_review_message_from_message(update, order_id)
-        return
-
-    if step == "waiting_comment":
-        order_id = context.user_data.get("rating_order_id")
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE orders SET rating_comment=%s WHERE id=%s",
-            (text, order_id),
-        )
-        conn.commit()
-        conn.close()
-
-        order = get_order(order_id)
-
-        if order["admin_msg_id"]:
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=ADMIN_CHANNEL_ID,
-                    message_id=order["admin_msg_id"],
-                    text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi"),
-                )
-            except Exception:
-                pass
-
-        context.user_data["step"] = None
-
-        reply_keyboard = ReplyKeyboardMarkup(
-            [["🍽 Yana buyurtma berish"]],
-            resize_keyboard=True,
-        )
-
-        await update.message.reply_text(
-            "🙏 Rahmat! Izohingiz qabul qilindi.",
-            reply_markup=reply_keyboard,
-        )
-        return
-
-    if step == "admin_add_name":
-        if user_id not in ADMIN_IDS:
-            return
-
-        context.user_data["new_food_name"] = text
-        context.user_data["step"] = "admin_add_price"
-        await update.message.reply_text("Narxini yozing. Masalan: 35000")
-        return
-
-    if step == "admin_add_price":
-        if user_id not in ADMIN_IDS:
-            return
-
-        if not text.isdigit():
-            await update.message.reply_text("Narx faqat raqam bo‘lishi kerak.")
-            return
-
-        context.user_data["new_food_price"] = int(text)
-        context.user_data["step"] = "admin_add_photo"
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏭ Rasmsiz qo‘shish", callback_data="admin_skip_photo")]
-        ])
-
-        await update.message.reply_text(
-            "Endi ovqat rasmini yuboring yoki rasmsiz qo‘shing.",
-            reply_markup=keyboard,
-        )
-        return
-
-    if step == "admin_work_time":
-        if user_id not in ADMIN_IDS:
-            return
-
-        try:
-            start_time_text, end_time_text = text.replace(" ", "").split("-")
-            datetime.strptime(start_time_text, "%H:%M")
-            datetime.strptime(end_time_text, "%H:%M")
-
-            conn = db()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE settings SET work_start=%s, work_end=%s WHERE id=1",
-                (start_time_text, end_time_text),
-            )
-            conn.commit()
-            conn.close()
-
-            context.user_data["step"] = None
-            await update.message.reply_text(
-                f"✅ Ish vaqti yangilandi: {start_time_text} – {end_time_text}"
-            )
-            await admin_panel(update, context)
-        except Exception:
-            await update.message.reply_text("Noto‘g‘ri format. Masalan: 09:00-23:00")
-        return
-
-    await update.message.reply_text("Menyu uchun /start bosing.")
 
 # ================= LOCATION / REVIEW =================
 
@@ -594,8 +561,13 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
+    cur.execute("SELECT * FROM food_users WHERE user_id=%s", (user_id,))
     user = cur.fetchone()
+
+    if not user:
+        conn.close()
+        await update.message.reply_text("Iltimos, /start bosib qayta ro‘yxatdan o‘ting.")
+        return
 
     items = []
     food_total = 0
@@ -627,7 +599,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = food_total + delivery_fee
 
     cur.execute("""
-        INSERT INTO orders 
+        INSERT INTO food_orders
         (user_id, user_name, phone, items, food_total, delivery_fee, distance_km, total,
          code, code_active, status, lat, lon, created_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, 0, %s, %s, %s, %s)
@@ -858,12 +830,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_menu":
         await show_admin_menu(query)
 
+    elif data.startswith("admin_food:"):
+        await show_admin_food_settings(query, int(data.split(":")[1]))
+
     elif data == "admin_add_food":
         if query.from_user.id not in ADMIN_IDS:
             return
 
         context.user_data["step"] = "admin_add_name"
-        await query.message.reply_text("Yangi ovqat nomini yozing:")
+
+        await query.message.reply_text(
+            "Yangi ovqat nomini yozing:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back_main")]
+            ])
+        )
 
     elif data == "admin_skip_photo":
         if query.from_user.id not in ADMIN_IDS:
@@ -875,7 +856,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO foods (name, price, available, photo_id) VALUES (%s, %s, 1, NULL)",
+            "INSERT INTO food_foods (name, price, available, photo_id) VALUES (%s, %s, 1, NULL)",
             (name, price),
         )
         conn.commit()
@@ -887,6 +868,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("admin_toggle:"):
         await admin_toggle_food(query, int(data.split(":")[1]))
 
+    elif data.startswith("admin_edit_price:"):
+        food_id = int(data.split(":")[1])
+        context.user_data["step"] = "admin_edit_price"
+        context.user_data["edit_food_id"] = food_id
+
+        await query.message.reply_text(
+            "Yangi narxni yozing. Masalan: 45000",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Orqaga", callback_data=f"admin_food:{food_id}")]
+            ])
+        )
+
+    elif data.startswith("admin_delete_food:"):
+        food_id = int(data.split(":")[1])
+
+        await query.edit_message_text(
+            "❗ Rostdan ham bu ovqatni o‘chirmoqchimisiz?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Ha, o‘chirish", callback_data=f"admin_confirm_delete:{food_id}")],
+                [InlineKeyboardButton("❌ Yo‘q", callback_data=f"admin_food:{food_id}")]
+            ])
+        )
+
+    elif data.startswith("admin_confirm_delete:"):
+        food_id = int(data.split(":")[1])
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM food_foods WHERE id=%s", (food_id,))
+        conn.commit()
+        conn.close()
+
+        await query.edit_message_text("🗑 Ovqat menyudan o‘chirildi.")
+
     elif data == "admin_work_time":
         if query.from_user.id not in ADMIN_IDS:
             return
@@ -895,7 +910,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(
             f"Hozirgi ish vaqti: {work_time_text()}\n\n"
-            "Yangi vaqtni yozing. Masalan: 09:00-23:00"
+            "Yangi vaqtni yozing. Masalan: 09:00-23:00",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back_main")]
+            ])
+        )
+
+    elif data == "admin_back_main":
+        context.user_data["step"] = None
+        await query.edit_message_text("👨‍💼 Admin panel")
+        await query.message.reply_text(
+            "Kerakli bo‘limni tanlang:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🍽 Menyuni boshqarish", callback_data="admin_menu")],
+                [InlineKeyboardButton("➕ Ovqat qo‘shish", callback_data="admin_add_food")],
+                [InlineKeyboardButton("⏰ Ish vaqtini sozlash", callback_data="admin_work_time")],
+                [InlineKeyboardButton("📊 Statistika", callback_data="admin_stats")],
+            ])
         )
 
     elif data == "admin_stats":
@@ -904,6 +935,203 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("stats:"):
         _, period, offset = data.split(":")
         await show_stats(query, period, int(offset))
+
+# ================= TEXT HANDLER CONTINUATION FOR ADMIN =================
+# DIQQAT: agar 2-qismdagi text_handler ichida admin step'lar bo‘lmasa,
+# quyidagi text_handler'ni 2-qismdagi eski text_handler o‘rniga to‘liq almashtiring.
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
+    step = context.user_data.get("step")
+
+    if text == "🍽 Yana buyurtma berish":
+        context.user_data["cart"] = {}
+        await show_menu(update, context)
+        return
+
+    if step == "waiting_name":
+        phone = context.user_data.get("phone")
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO food_users (user_id, name, phone)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone
+            """,
+            (user_id, text, phone),
+        )
+        conn.commit()
+        conn.close()
+
+        context.user_data["step"] = None
+        context.user_data["cart"] = {}
+
+        await update.message.reply_text(f"Rahmat, {text}!")
+        await show_menu(update, context)
+        return
+
+    if step == "edit_name":
+        order_id = context.user_data["edit_order_id"]
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE food_orders SET user_name=%s WHERE id=%s", (text, order_id))
+        conn.commit()
+        conn.close()
+
+        context.user_data["step"] = None
+        await update.message.reply_text("✅ Ism yangilandi.")
+        await send_review_message_from_message(update, order_id)
+        return
+
+    if step == "edit_phone":
+        order_id = context.user_data["edit_order_id"]
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE food_orders SET phone=%s WHERE id=%s", (text, order_id))
+        conn.commit()
+        conn.close()
+
+        context.user_data["step"] = None
+        await update.message.reply_text("✅ Telefon raqam yangilandi.")
+        await send_review_message_from_message(update, order_id)
+        return
+
+    if step == "waiting_comment":
+        order_id = context.user_data.get("rating_order_id")
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE food_orders SET rating_comment=%s WHERE id=%s",
+            (text, order_id),
+        )
+        conn.commit()
+        conn.close()
+
+        order = get_order(order_id)
+
+        if order["admin_msg_id"]:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=ADMIN_CHANNEL_ID,
+                    message_id=order["admin_msg_id"],
+                    text=order_text(order, "✅ Buyurtma yetkazildi\n\nKod yopildi"),
+                )
+            except Exception:
+                pass
+
+        context.user_data["step"] = None
+
+        reply_keyboard = ReplyKeyboardMarkup(
+            [["🍽 Yana buyurtma berish"]],
+            resize_keyboard=True,
+        )
+
+        await update.message.reply_text(
+            "🙏 Rahmat! Izohingiz qabul qilindi.",
+            reply_markup=reply_keyboard,
+        )
+        return
+
+    if step == "admin_add_name":
+        if user_id not in ADMIN_IDS:
+            return
+
+        context.user_data["new_food_name"] = text
+        context.user_data["step"] = "admin_add_price"
+
+        await update.message.reply_text(
+            "Narxini yozing. Masalan: 35000",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back_main")]
+            ])
+        )
+        return
+
+    if step == "admin_add_price":
+        if user_id not in ADMIN_IDS:
+            return
+
+        if not text.isdigit():
+            await update.message.reply_text("Narx faqat raqam bo‘lishi kerak.")
+            return
+
+        context.user_data["new_food_price"] = int(text)
+        context.user_data["step"] = "admin_add_photo"
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ Rasmsiz qo‘shish", callback_data="admin_skip_photo")],
+            [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back_main")]
+        ])
+
+        await update.message.reply_text(
+            "Endi ovqat rasmini yuboring yoki rasmsiz qo‘shing.",
+            reply_markup=keyboard,
+        )
+        return
+
+    if step == "admin_edit_price":
+        if user_id not in ADMIN_IDS:
+            return
+
+        if not text.isdigit():
+            await update.message.reply_text("Narx faqat raqam bo‘lishi kerak.")
+            return
+
+        food_id = context.user_data["edit_food_id"]
+        new_price = int(text)
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE food_foods SET price=%s WHERE id=%s",
+            (new_price, food_id)
+        )
+        conn.commit()
+        conn.close()
+
+        context.user_data["step"] = None
+
+        await update.message.reply_text(
+            f"✅ Narx yangilandi: {format_price(new_price)} so‘m"
+        )
+        return
+
+    if step == "admin_work_time":
+        if user_id not in ADMIN_IDS:
+            return
+
+        try:
+            start_time_text, end_time_text = text.replace(" ", "").split("-")
+            datetime.strptime(start_time_text, "%H:%M")
+            datetime.strptime(end_time_text, "%H:%M")
+
+            conn = db()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE food_settings SET work_start=%s, work_end=%s WHERE id=%s",
+                (start_time_text, end_time_text, 1),
+            )
+            conn.commit()
+            conn.close()
+
+            context.user_data["step"] = None
+            await update.message.reply_text(
+                f"✅ Ish vaqti yangilandi: {start_time_text} – {end_time_text}"
+            )
+            await admin_panel(update, context)
+        except Exception:
+            await update.message.reply_text("Noto‘g‘ri format. Masalan: 09:00-23:00")
+        return
+
+    await update.message.reply_text("Menyu uchun /start bosing.")
+
 
 # ================= ORDER FLOW =================
 
@@ -919,7 +1147,7 @@ async def confirm_order(query, context, order_id):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE orders SET status=%s, code=%s, code_active=1 WHERE id=%s",
+        "UPDATE food_orders SET status=%s, code=%s, code_active=1 WHERE id=%s",
         ("payment_waiting", code, order_id),
     )
     conn.commit()
@@ -1058,12 +1286,13 @@ async def send_to_admin(context, order_id):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE orders SET admin_msg_id=%s WHERE id=%s",
+        "UPDATE food_orders SET admin_msg_id=%s WHERE id=%s",
         (msg.message_id, order_id),
     )
     conn.commit()
     conn.close()
 
+# ================= ADMIN PAYMENT / KITCHEN / DELIVERY / RATING =================
 
 async def admin_paid(query, context, order_id):
     order = get_order(order_id)
@@ -1111,7 +1340,6 @@ async def admin_not_paid(query, context, order_id):
 
     await query.edit_message_text(order_text(order, "❌ To‘lov tasdiqlanmadi"))
 
-# ================= KITCHEN / DELIVERY / RATING =================
 
 async def kitchen_ready(query, context, order_id):
     order = get_order(order_id)
@@ -1167,7 +1395,7 @@ async def delivery_start(query, context, order_id):
     conn = db()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE orders
+        UPDATE food_orders
         SET status=%s, courier_id=%s, courier_name=%s, courier_username=%s
         WHERE id=%s
     """, ("on_the_way", courier_id, courier_name, courier_username, order_id))
@@ -1256,7 +1484,7 @@ async def save_rating(query, context, order_id, rating):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE orders SET rating=%s WHERE id=%s",
+        "UPDATE food_orders SET rating=%s WHERE id=%s",
         (rating, order_id),
     )
     conn.commit()
@@ -1295,7 +1523,7 @@ async def skip_comment(query, context, order_id):
 
     await query.edit_message_text("🙏 Rahmat! Baho uchun minnatdormiz.")
 
- # ================= ADMIN PANEL =================
+# ================= ADMIN PANEL =================
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1312,13 +1540,13 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await update.message.reply_text(
-        "👨‍💼 Admin panel:",
+        "👨‍💼 Admin panel\n\nKerakli bo‘limni tanlang:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 async def show_admin_menu(query):
-    foods = get_foods()
+    foods = get_foods(include_all=True)
 
     text = "🍽 Menyu boshqaruvi:\n\n"
     keyboard = []
@@ -1329,12 +1557,43 @@ async def show_admin_menu(query):
 
         keyboard.append([
             InlineKeyboardButton(
-                f"{food['name']} holatini o‘zgartirish",
-                callback_data=f"admin_toggle:{food['id']}",
+                f"⚙️ {food['name']}",
+                callback_data=f"admin_food:{food['id']}",
             )
         ])
 
     keyboard.append([InlineKeyboardButton("➕ Ovqat qo‘shish", callback_data="admin_add_food")])
+    keyboard.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back_main")])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def show_admin_food_settings(query, food_id):
+    food = get_food(food_id)
+
+    if not food:
+        await query.answer("Ovqat topilmadi.", show_alert=True)
+        return
+
+    status = "✅ Mavjud" if food["available"] else "❌ Tugagan"
+
+    text = f"""
+🍽 Ovqat sozlamalari
+
+Nomi: {food['name']}
+Narxi: {format_price(food['price'])} so‘m
+Holati: {status}
+"""
+
+    keyboard = [
+        [InlineKeyboardButton("✅ / ❌ Holatini o‘zgartirish", callback_data=f"admin_toggle:{food_id}")],
+        [InlineKeyboardButton("✏️ Narxni o‘zgartirish", callback_data=f"admin_edit_price:{food_id}")],
+        [InlineKeyboardButton("🗑 O‘chirish", callback_data=f"admin_delete_food:{food_id}")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_menu")],
+    ]
 
     await query.edit_message_text(
         text,
@@ -1348,17 +1607,20 @@ async def admin_toggle_food(query, food_id):
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT available FROM foods WHERE id=%s", (food_id,))
+    cur.execute("SELECT available FROM food_foods WHERE id=%s", (food_id,))
     food = cur.fetchone()
 
     if food:
         new_status = 0 if food["available"] else 1
-        cur.execute("UPDATE foods SET available=%s WHERE id=%s", (new_status, food_id))
+        cur.execute(
+            "UPDATE food_foods SET available=%s WHERE id=%s",
+            (new_status, food_id),
+        )
 
     conn.commit()
     conn.close()
 
-    await show_admin_menu(query)
+    await show_admin_food_settings(query, food_id)
 
 
 # ================= STATISTICS =================
@@ -1372,6 +1634,7 @@ async def show_stats_menu(query):
         [InlineKeyboardButton("🗓 Haftalik", callback_data="stats:week:0")],
         [InlineKeyboardButton("📆 Oylik", callback_data="stats:month:0")],
         [InlineKeyboardButton("📈 Yillik", callback_data="stats:year:0")],
+        [InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_back_main")],
     ]
 
     await query.edit_message_text(
@@ -1438,7 +1701,7 @@ async def show_stats(query, period, offset):
     conn = db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM orders WHERE created_at BETWEEN %s AND %s",
+        "SELECT * FROM food_orders WHERE created_at BETWEEN %s AND %s",
         (start.isoformat(), end.isoformat()),
     )
     rows = cur.fetchall()
