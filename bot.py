@@ -5,32 +5,24 @@ import sqlite3
 from datetime import datetime
 
 from telegram import (
-    Update,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+    Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
 
 TOKEN = os.getenv("TOKEN", "BOT_TOKEN_BU_YERGA")
 
 ADMIN_IDS = [5702824058]
 
-ADMIN_CHANNEL_ID = -1001111111111
-KITCHEN_CHANNEL_ID = -1002222222222
-DELIVERY_CHANNEL_ID = -1003333333333
+ADMIN_CHANNEL_ID = -1003925609420
+KITCHEN_CHANNEL_ID = -1003992130229
+DELIVERY_CHANNEL_ID = -1003937711655
 
-ADMIN_USERNAME = "@admin_username"
-CARD_NUMBER = "8600 0000 0000 0000"
+ADMIN_USERNAME = "@farrukh01uz"
+CARD_NUMBER = "9860060138529692"
 
 DB_NAME = "food_bot.db"
 
@@ -100,6 +92,15 @@ def init_db():
     conn.close()
 
 
+def get_foods():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM foods ORDER BY id ASC")
+    foods = cur.fetchall()
+    conn.close()
+    return foods
+
+
 def get_food(food_id):
     conn = db()
     cur = conn.cursor()
@@ -107,15 +108,6 @@ def get_food(food_id):
     food = cur.fetchone()
     conn.close()
     return food
-
-
-def get_foods():
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM foods ORDER BY id DESC")
-    foods_list = cur.fetchall()
-    conn.close()
-    return foods_list
 
 
 def get_order(order_id):
@@ -146,8 +138,11 @@ def generate_code():
     cur = conn.cursor()
 
     while True:
-        code = str(random.randint(100000, 999999))
-        cur.execute("SELECT id FROM orders WHERE code=? AND code_active=1", (code,))
+        code = str(random.randint(1000, 9999))
+        cur.execute(
+            "SELECT id FROM orders WHERE code=? AND code_active=1",
+            (code,)
+        )
         if not cur.fetchone():
             conn.close()
             return code
@@ -160,7 +155,7 @@ def order_text(order, title):
     text += f"📦 Buyurtma: #{order['id']}\n"
     text += f"👤 Ism: {order['user_name']}\n"
     text += f"📞 Telefon: {order['phone']}\n"
-    text += f"💳 Kod: {order['code']}\n\n"
+    text += f"🔢 Kod: {order['code']}\n\n"
     text += "🍔 Buyurtmalar:\n"
 
     for item in items:
@@ -172,14 +167,13 @@ def order_text(order, title):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    context.user_data.setdefault("cart", {})
 
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     user = cur.fetchone()
     conn.close()
-
-    context.user_data.setdefault("cart", {})
 
     if user:
         await show_menu(update, context)
@@ -208,7 +202,6 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
-
     step = context.user_data.get("step")
 
     if step == "waiting_name":
@@ -231,12 +224,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if step == "admin_add_name":
+        if user_id not in ADMIN_IDS:
+            return
+
         context.user_data["new_food_name"] = text
         context.user_data["step"] = "admin_add_price"
         await update.message.reply_text("Narxini yozing. Masalan: 35000")
         return
 
     if step == "admin_add_price":
+        if user_id not in ADMIN_IDS:
+            return
+
         if not text.isdigit():
             await update.message.reply_text("Narx faqat raqam bo‘lishi kerak.")
             return
@@ -262,10 +261,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    foods_list = get_foods()
-
+    foods = get_foods()
     keyboard = []
-    for food in foods_list:
+
+    for food in foods:
         status = "✅" if food["available"] else "❌ Tugagan"
         keyboard.append([
             InlineKeyboardButton(
@@ -287,104 +286,6 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    context.user_data.setdefault("cart", {})
-    cart = context.user_data["cart"]
-
-    if data.startswith("food:"):
-        food_id = int(data.split(":")[1])
-        food = get_food(food_id)
-
-        if not food:
-            await query.edit_message_text("Bu ovqat topilmadi.")
-            return
-
-        if food["available"] == 0:
-            await query.answer("Kechirasiz, bu ovqat hozircha mavjud emas.", show_alert=True)
-            return
-
-        cart[str(food_id)] = cart.get(str(food_id), 0) + 1
-        await show_food_quantity(query, context, food_id)
-
-    elif data.startswith("plus:"):
-        food_id = int(data.split(":")[1])
-        food = get_food(food_id)
-
-        if food and food["available"]:
-            cart[str(food_id)] = cart.get(str(food_id), 0) + 1
-
-        await show_food_quantity(query, context, food_id)
-
-    elif data.startswith("minus:"):
-        food_id = int(data.split(":")[1])
-
-        if cart.get(str(food_id), 0) > 1:
-            cart[str(food_id)] -= 1
-        else:
-            cart.pop(str(food_id), None)
-
-        await show_food_quantity(query, context, food_id)
-
-    elif data == "menu":
-        await show_menu(update, context)
-
-    elif data == "cart":
-        await show_cart(query, context)
-
-    elif data == "checkout":
-        if not cart:
-            await query.edit_message_text("Savatcha bo‘sh.")
-            return
-
-        btn = KeyboardButton("📍 Lokatsiya yuborish", request_location=True)
-        keyboard = ReplyKeyboardMarkup([[btn]], resize_keyboard=True)
-
-        context.user_data["step"] = "waiting_location"
-
-        await query.message.reply_text(
-            "Buyurtmani yakunlash uchun lokatsiyangizni yuboring.",
-            reply_markup=keyboard
-        )
-
-    elif data == "admin_menu":
-        await show_admin_menu(query)
-
-    elif data == "admin_add_food":
-        if query.from_user.id not in ADMIN_IDS:
-            return
-        context.user_data["step"] = "admin_add_name"
-        await query.message.reply_text("Yangi ovqat nomini yozing:")
-
-    elif data.startswith("admin_toggle:"):
-        food_id = int(data.split(":")[1])
-        await admin_toggle_food(query, food_id)
-
-    elif data.startswith("admin_paid:"):
-        await admin_paid(query, context, int(data.split(":")[1]))
-
-    elif data.startswith("admin_not_paid:"):
-        await admin_not_paid(query, context, int(data.split(":")[1]))
-
-    elif data.startswith("kitchen_ready:"):
-        await kitchen_ready(query, context, int(data.split(":")[1]))
-
-    elif data.startswith("delivery_start:"):
-        await delivery_start(query, context, int(data.split(":")[1]))
-
-    elif data.startswith("delivery_done:"):
-        await delivery_done(query, context, int(data.split(":")[1]))
-
-    elif data.startswith("rate:"):
-        _, order_id, rating = data.split(":")
-        await query.edit_message_text(
-            f"Rahmat! Buyurtma #{order_id} uchun {rating} ⭐️ baho berdingiz."
         )
 
 
@@ -453,6 +354,10 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cart = context.user_data.get("cart", {})
     loc = update.message.location
 
+    if not cart:
+        await update.message.reply_text("Savatchangiz bo‘sh.")
+        return
+
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
@@ -490,7 +395,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         json.dumps(items, ensure_ascii=False),
         total,
         code,
-        "payment_waiting",
+        "pending_review",
         loc.latitude,
         loc.longitude,
         datetime.now().isoformat()
@@ -500,26 +405,233 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    context.user_data["cart"] = {}
     context.user_data["step"] = None
 
+    await send_review_to_user(update, context, order_id)
+
+
+async def send_review_to_user(update, context, order_id):
+    order = get_order(order_id)
+
+    text = order_text(
+        order,
+        "📋 Buyurtmani tekshiring\n\n📍 Manzil: Siz yuborgan lokatsiya qabul qilindi"
+    )
+
+    text += "\n\nAgar hammasi to‘g‘ri bo‘lsa, tasdiqlang."
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Tasdiqlash va to‘lovga o‘tish", callback_data=f"confirm_order:{order_id}")],
+        [InlineKeyboardButton("✏️ Buyurtmani tahrirlash", callback_data=f"edit_order:{order_id}")],
+        [InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel:{order_id}")]
+    ]
+
     await update.message.reply_text(
-        f"""
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    context.user_data.setdefault("cart", {})
+    cart = context.user_data["cart"]
+
+    if data.startswith("food:"):
+        food_id = int(data.split(":")[1])
+        food = get_food(food_id)
+
+        if not food:
+            await query.answer("Bu ovqat topilmadi.", show_alert=True)
+            return
+
+        if food["available"] == 0:
+            await query.answer("Kechirasiz, bu ovqat hozircha mavjud emas.", show_alert=True)
+            return
+
+        cart[str(food_id)] = cart.get(str(food_id), 0) + 1
+        await show_food_quantity(query, context, food_id)
+
+    elif data.startswith("plus:"):
+        food_id = int(data.split(":")[1])
+        food = get_food(food_id)
+
+        if food and food["available"]:
+            cart[str(food_id)] = cart.get(str(food_id), 0) + 1
+
+        await show_food_quantity(query, context, food_id)
+
+    elif data.startswith("minus:"):
+        food_id = int(data.split(":")[1])
+
+        if cart.get(str(food_id), 0) > 1:
+            cart[str(food_id)] -= 1
+        else:
+            cart.pop(str(food_id), None)
+
+        await show_food_quantity(query, context, food_id)
+
+    elif data == "menu":
+        await show_menu(update, context)
+
+    elif data == "cart":
+        await show_cart(query, context)
+
+    elif data == "checkout":
+        if not cart:
+            await query.edit_message_text("Savatcha bo‘sh.")
+            return
+
+        btn = KeyboardButton("📍 Lokatsiya yuborish", request_location=True)
+        keyboard = ReplyKeyboardMarkup([[btn]], resize_keyboard=True)
+
+        context.user_data["step"] = "waiting_location"
+
+        await query.message.reply_text(
+            "Buyurtmani yakunlash uchun lokatsiyangizni yuboring.",
+            reply_markup=keyboard
+        )
+
+    elif data.startswith("confirm_order:"):
+        order_id = int(data.split(":")[1])
+        await confirm_order(query, context, order_id)
+
+    elif data.startswith("edit_order:"):
+        order_id = int(data.split(":")[1])
+        await edit_order(query, context, order_id, update)
+
+    elif data.startswith("cancel:"):
+        order_id = int(data.split(":")[1])
+        await cancel_question(query, order_id)
+
+    elif data.startswith("confirm_cancel:"):
+        order_id = int(data.split(":")[1])
+        await confirm_cancel(query, context, order_id)
+
+    elif data == "admin_menu":
+        await show_admin_menu(query)
+
+    elif data == "admin_add_food":
+        if query.from_user.id not in ADMIN_IDS:
+            return
+        context.user_data["step"] = "admin_add_name"
+        await query.message.reply_text("Yangi ovqat nomini yozing:")
+
+    elif data.startswith("admin_toggle:"):
+        food_id = int(data.split(":")[1])
+        await admin_toggle_food(query, food_id)
+
+    elif data.startswith("admin_paid:"):
+        await admin_paid(query, context, int(data.split(":")[1]))
+
+    elif data.startswith("admin_not_paid:"):
+        await admin_not_paid(query, context, int(data.split(":")[1]))
+
+    elif data.startswith("kitchen_ready:"):
+        await kitchen_ready(query, context, int(data.split(":")[1]))
+
+    elif data.startswith("delivery_start:"):
+        await delivery_start(query, context, int(data.split(":")[1]))
+
+    elif data.startswith("delivery_done:"):
+        await delivery_done(query, context, int(data.split(":")[1]))
+
+    elif data.startswith("rate:"):
+        _, order_id, rating = data.split(":")
+        await query.edit_message_text(
+            f"Rahmat! Buyurtma #{order_id} uchun {rating} ⭐️ baho berdingiz."
+        )
+
+
+async def confirm_order(query, context, order_id):
+    order = get_order(order_id)
+
+    if order["status"] != "pending_review":
+        await query.answer("Bu buyurtma allaqachon qayta ishlangan.", show_alert=True)
+        return
+
+    update_order(order_id, status="payment_waiting")
+
+    text = f"""
 💳 To‘lov ma’lumotlari
 
 📦 Buyurtma: #{order_id}
-🔢 Tasdiqlash kodi: {code}
+🔢 Tasdiqlash kodi: {order['code']}
 
-💰 Jami summa: {format_price(total)} so‘m
+💰 Jami summa: {format_price(order['total'])} so‘m
 💳 Karta: {CARD_NUMBER}
 
-Pul o‘tkazayotganda comment qismiga shu kodni yozing:
-{code}
-""",
-        reply_markup=ReplyKeyboardRemove()
+Pul o‘tkazayotganda izoh qismiga shu kodni yozing:
+{order['code']}
+"""
+
+    keyboard = [
+        [InlineKeyboardButton("✏️ Buyurtmani tahrirlash", callback_data=f"edit_order:{order_id}")],
+        [InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel:{order_id}")]
+    ]
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
     await send_to_admin(context, order_id)
+
+
+async def edit_order(query, context, order_id, update):
+    order = get_order(order_id)
+
+    if order["status"] not in ["pending_review", "payment_waiting"]:
+        await query.answer("Bu buyurtmani endi tahrirlab bo‘lmaydi.", show_alert=True)
+        return
+
+    update_order(order_id, status="edited_cancelled", code_active=0)
+
+    old_items = json.loads(order["items"])
+    new_cart = {}
+
+    for item in old_items:
+        new_cart[str(item["id"])] = item["qty"]
+
+    context.user_data["cart"] = new_cart
+
+    await query.edit_message_text(
+        "✏️ Buyurtmani tahrirlashingiz mumkin. Menyudan kerakli o‘zgarishlarni qiling."
+    )
+
+    await show_menu(update, context)
+
+
+async def cancel_question(query, order_id):
+    keyboard = [
+        [InlineKeyboardButton("✅ Ha, bekor qilaman", callback_data=f"confirm_cancel:{order_id}")],
+        [InlineKeyboardButton("❌ Yo‘q", callback_data="menu")]
+    ]
+
+    await query.edit_message_text(
+        "❗ Rostdan ham buyurtmani bekor qilmoqchimisiz?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def confirm_cancel(query, context, order_id):
+    order = get_order(order_id)
+
+    if order["status"] not in ["pending_review", "payment_waiting"]:
+        await query.answer("Bu buyurtmani endi bekor qilib bo‘lmaydi.", show_alert=True)
+        return
+
+    update_order(order_id, status="cancelled", code_active=0)
+
+    await query.edit_message_text("❌ Buyurtmangiz bekor qilindi.")
+
+    await context.bot.send_message(
+        chat_id=ADMIN_CHANNEL_ID,
+        text=f"❌ Buyurtma #{order_id} mijoz tomonidan bekor qilindi.\n🔢 Kod: {order['code']}"
+    )
 
 
 async def send_to_admin(context, order_id):
@@ -545,6 +657,11 @@ async def send_to_admin(context, order_id):
 
 async def admin_paid(query, context, order_id):
     order = get_order(order_id)
+
+    if order["status"] != "payment_waiting":
+        await query.answer("Bu buyurtma to‘lov kutish holatida emas.", show_alert=True)
+        return
+
     update_order(order_id, status="paid")
 
     await context.bot.send_message(
@@ -584,6 +701,11 @@ async def admin_not_paid(query, context, order_id):
 
 async def kitchen_ready(query, context, order_id):
     order = get_order(order_id)
+
+    if order["status"] != "paid":
+        await query.answer("Avval to‘lov tasdiqlanishi kerak.", show_alert=True)
+        return
+
     update_order(order_id, status="ready")
 
     await context.bot.send_message(
@@ -598,7 +720,10 @@ async def kitchen_ready(query, context, order_id):
 
     await context.bot.send_message(
         chat_id=DELIVERY_CHANNEL_ID,
-        text=order_text(order, "🚚 Kuryerlar uchun buyurtma\n\nHolat: ✅ Tayyor"),
+        text=order_text(
+            order,
+            "🚚 Kuryerlar uchun buyurtma\n\nHolat: ✅ Tayyor\n📍 Lokatsiya pastda yuborilgan"
+        ),
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -613,6 +738,11 @@ async def kitchen_ready(query, context, order_id):
 
 async def delivery_start(query, context, order_id):
     order = get_order(order_id)
+
+    if order["status"] != "ready":
+        await query.answer("Buyurtma hali tayyor holatda emas.", show_alert=True)
+        return
+
     update_order(order_id, status="on_the_way")
 
     await context.bot.send_message(
@@ -625,6 +755,11 @@ async def delivery_start(query, context, order_id):
 
 async def delivery_done(query, context, order_id):
     order = get_order(order_id)
+
+    if order["status"] not in ["ready", "on_the_way"]:
+        await query.answer("Bu buyurtmani yetkazildi qilib bo‘lmaydi.", show_alert=True)
+        return
+
     update_order(order_id, status="completed", code_active=0)
 
     keyboard = [
@@ -667,14 +802,15 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_admin_menu(query):
-    foods_list = get_foods()
+    foods = get_foods()
 
     text = "🍽 Menyu boshqaruvi:\n\n"
     keyboard = []
 
-    for food in foods_list:
+    for food in foods:
         status = "✅ Mavjud" if food["available"] else "❌ Tugagan"
         text += f"{food['id']}. {food['name']} — {format_price(food['price'])} so‘m — {status}\n"
+
         keyboard.append([
             InlineKeyboardButton(
                 f"{food['name']} holatini o‘zgartirish",
@@ -684,7 +820,10 @@ async def show_admin_menu(query):
 
     keyboard.append([InlineKeyboardButton("➕ Ovqat qo‘shish", callback_data="admin_add_food")])
 
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 async def admin_toggle_food(query, food_id):
