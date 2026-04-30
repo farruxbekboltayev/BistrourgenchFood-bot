@@ -729,11 +729,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "checkout":
         if not is_work_time():
-            await query.answer(
-                f"⏰ Hozir yopiqmiz. Ish vaqti: {work_time_text()}",
-                show_alert=True
-            )
-            return
+           await query.message.reply_text(
+            f"⏰ Hozir buyurtma qabul qilinmaydi.\n\n"
+            f"Ish vaqti: {work_time_text()}"
+        )
+        return
 
         if not cart:
             await query.edit_message_text("Savatcha bo‘sh.")
