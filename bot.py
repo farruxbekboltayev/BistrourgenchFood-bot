@@ -728,25 +728,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_cart(query, context)
 
     elif data == "checkout":
-        if not is_work_time():
-           await query.message.reply_text(
-            f"⏰ Hozir buyurtma qabul qilinmaydi.\n\n"
-            f"Ish vaqti: {work_time_text()}"
-        )
-        return
+        cart = context.user_data.get("cart", {})
 
         if not cart:
-            await query.edit_message_text("Savatcha bo‘sh.")
+            await query.message.reply_text(
+            "🛒 Savatcha bo‘sh yoki bot qayta ishga tushgan.\n\n"
+            "Iltimos, /start bosib qaytadan ovqat tanlang."
+            )
             return
+
+        try:
+            if not is_work_time():
+                await query.message.reply_text(
+                    f"⏰ Hozir buyurtma qabul qilinmaydi.\n\n"
+                    f"Ish vaqti: {work_time_text()}"
+                )
+                return
+        except Exception as e:
+            await query.message.reply_text(
+                f"⚠️ Ish vaqtini tekshirishda xato:\n{e}"
+            )
+            return
+
+        context.user_data["step"] = "waiting_location"
 
         btn = KeyboardButton("📍 Lokatsiya yuborish", request_location=True)
         keyboard = ReplyKeyboardMarkup([[btn]], resize_keyboard=True)
 
-        context.user_data["step"] = "waiting_location"
-
         await query.message.reply_text(
-            "Buyurtmani yakunlash uchun lokatsiyangizni yuboring.",
-            reply_markup=keyboard,
+            "📍 Buyurtmani yakunlash uchun lokatsiyangizni yuboring.",
+            reply_markup=keyboard
         )
 
     elif data.startswith("confirm_order:"):
