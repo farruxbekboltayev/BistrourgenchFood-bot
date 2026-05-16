@@ -1810,7 +1810,7 @@ Davr: {start.date()} – {end.date()}
 import asyncio
 
 async def run():
-        threading.Thread(target=start_server, daemon=True).start()
+    threading.Thread(target=start_server, daemon=True).start()
 
     if not TOKEN:
         raise ValueError("TOKEN yo'q")
