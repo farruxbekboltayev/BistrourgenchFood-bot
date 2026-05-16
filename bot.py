@@ -1813,7 +1813,10 @@ async def run():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     print("Bot ishga tushdi...")
-    await app.run_polling()
+    async with app:
+        await app.start()
+        await app.updater.start_polling()
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(run())
