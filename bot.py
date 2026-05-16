@@ -1794,11 +1794,11 @@ Davr: {start.date()} – {end.date()}
 
 import asyncio
 
-def main():
+async def run():
     if not TOKEN:
-        raise ValueError("TOKEN Railway Variables ichida yo'q")
+        raise ValueError("TOKEN yo'q")
     if not DATABASE_URL:
-        raise ValueError("DATABASE_URL Railway Variables ichida yo'q")
+        raise ValueError("DATABASE_URL yo'q")
 
     init_db()
 
@@ -1813,7 +1813,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     print("Bot ishga tushdi...")
-    app.run_polling(close_loop=False)
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run())
