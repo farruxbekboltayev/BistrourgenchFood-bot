@@ -1,3 +1,18 @@
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot ishlayapti!")
+    def log_message(self, *args):
+        pass
+
+def start_server():
+    server = HTTPServer(("0.0.0.0", 8080), Handler)
+    server.serve_forever()
+
 import os
 import json
 import math
@@ -1795,6 +1810,8 @@ Davr: {start.date()} – {end.date()}
 import asyncio
 
 async def run():
+        threading.Thread(target=start_server, daemon=True).start()
+
     if not TOKEN:
         raise ValueError("TOKEN yo'q")
     if not DATABASE_URL:
