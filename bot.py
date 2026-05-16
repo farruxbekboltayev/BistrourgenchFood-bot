@@ -1797,7 +1797,6 @@ import asyncio
 def main():
     if not TOKEN:
         raise ValueError("TOKEN Railway Variables ichida yo'q")
-
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL Railway Variables ichida yo'q")
 
@@ -1807,7 +1806,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
-
     app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
@@ -1815,8 +1813,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     print("Bot ishga tushdi...")
-    asyncio.run(app.run_polling())
-
+    app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
